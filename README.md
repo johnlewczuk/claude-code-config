@@ -5,7 +5,7 @@ programs, skills and global instructions.
 
 - Mods (installable plugins): [path-links](#path-links), [copy-code](#copy-code),
   [reply-timestamp](#reply-timestamp)
-- Programs: [claude-rgb](programs/claude-rgb), [statusline](programs/statusline), [vocalize](programs/vocalize)
+- Programs: [claude-rgb](programs/claude-rgb), [prview](programs/prview), [statusline](programs/statusline), [vocalize](programs/vocalize)
 - Skills: [review-until-clean](skills/review-until-clean), [prepare-pr](skills/prepare-pr),
   [review-retro](skills/review-retro), tested by [evals](evals)
 - Global instructions: [CLAUDE.md](#global-claudemd)

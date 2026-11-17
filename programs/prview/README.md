@@ -1,0 +1,68 @@
+# prview
+
+A local web page for reviewing GitHub pull requests, with three things
+github.com doesn't give you:
+
+- **Which commit changed each line.** Every added or removed line has a tag
+  like `3/7`. Hover it for the full commit message.
+- **A reading order.** Files and functions are listed in the order to read
+  them: where the change starts, then along the call path, then helpers and
+  tests. The order is taken from the PR description's "Suggested reading
+  order" if it has one; otherwise Claude writes one.
+- **Claude beside the diff.** Select lines and ask about them, or have Claude
+  draft a review comment you then edit. Claude can read the whole checkout
+  but can't change files, run commands or post anything.
+
+You can also do a normal review: comment on lines or ranges, suggest changes,
+reply, resolve, mark files Viewed (shared with github.com), and submit as
+Comment, Approve or Request changes. Draft comments go into GitHub's pending
+review and only go out when you submit.
+
+## Use
+
+```sh
+prview 482                                   # PR 482 of the repo in this folder
+prview owner/repo#482
+prview https://github.com/owner/repo/pull/482
+```
+
+The first run starts the server in the background on port 7450 (log in
+`~/.cache/prview/server.log`) and opens the browser. It prints the link
+with the access key; open that link once on any other machine (for example
+over Tailscale) and that browser is remembered. The home page there has a
+box to paste a PR link.
+
+`prview stop`, or the ⏻ Stop button in the page, shuts the server down.
+Running `prview <PR>` again starts it.
+
+`prview serve [-addr :7450]` runs the server in the foreground instead.
+
+Needs `gh` (logged in), `git`, and `claude` for the Claude parts. Set
+`PRVIEW_MODEL` to choose the model Claude uses.
+
+## Where things are kept
+
+- `~/.config/prview/key`: the access key. Delete it and restart the server
+  to make a new one, which logs out every browser.
+- `~/.cache/prview/repos/`: a light copy of each repo (file contents are
+  downloaded only when needed).
+- `~/.cache/prview/worktrees/`: a checkout per PR, for Claude to read.
+- `~/.cache/prview/orders/`, `chats/`: saved reading orders and Claude
+  conversations.
+
+## Build
+
+```sh
+make          # builds the page (web/) and the Go binary ./prview
+make test     # Go tests, type check and page tests
+make install  # go install
+```
+
+## Safety
+
+The server listens on all interfaces and can post to GitHub as you, so:
+every request needs the key (from the link once, then an `HttpOnly`,
+`SameSite=Strict` cookie), and every request that changes something must
+come from prview's own page (`Origin` must match `Host`). Comments and
+approvals are refused when the PR got new commits since the page loaded;
+reload first.

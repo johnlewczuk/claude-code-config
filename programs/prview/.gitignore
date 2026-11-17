@@ -1,0 +1,9 @@
+.superpowers/
+docs/superpowers/
+.impeccable/
+web/node_modules/
+internal/server/dist/*
+!internal/server/dist/.keep
+/prview
+# The repo root ignores tsconfig.json (mods generate theirs); the page needs this one.
+!web/tsconfig.json
