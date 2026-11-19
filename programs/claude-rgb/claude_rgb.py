@@ -36,22 +36,36 @@ Layout (Razer Cynosa Chroma, but any keyboard with OpenRGB key names works):
   Escape        red when any limit >= 90 %
   everything else: dim base, pulsing red while an alarm is active
 
-The pure part (Session, Stats, SlotMap, render, snapshot) is unit tested and
-has no OpenRGB dependency; only main() talks to the server and tmux.
+Ripples mode (claude-rgb-mode, Ctrl+Alt+R; kept in ~/.local/state/claude-rgb/mode)
+replaces that layout with a Claude-themed look: nearly dark keys, a breathing
+logo, and a coral ring from every key you press (read through X11 XInput2 raw
+events) that fades out within 2 s. Sessions are still tracked, so the jump
+shortcuts keep working.
+
+The pure part (Session, Stats, SlotMap, render, render_ripples, snapshot) is
+unit tested and has no OpenRGB dependency; only main() talks to the server,
+tmux and X11.
 """
 from __future__ import annotations
 
+import colorsys
 import enum
 import json
 import math
 import os
 import re
+import select
 import shutil
+import socket
+import struct
 import subprocess
 import sys
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, Collection, Mapping, Optional
+from datetime import datetime
+from typing import Callable, Collection, Iterator, Mapping, Optional
 
 Colour = tuple[int, int, int]
 
@@ -144,7 +158,7 @@ class Session:
     pane: Optional[str]
     transcript: Optional[str]
     file_mtime: float
-    activity: float          # transcript mtime: when it last did something
+    activity: float          # when its turn state last changed (see turn_from_transcript)
     fresh: bool              # statusline wrote recently
     running: bool            # its pane runs claude and no newer session shares the pane (True if no pane)
     busy: bool
@@ -286,12 +300,227 @@ def render(names: list[str], s: Optional[Stats], t: float) -> list[Colour]:
     return frame
 
 
+# --- ripples mode ---------------------------------------------------------------
+# A look with no session info: the board rests nearly dark coral, the logo
+# breathes, every key press sends a ring in that key's own colour (a rainbow
+# laid diagonally across the board) that fades out, and a key glows cream while
+# held, fading after release. Switched by hand (claude-rgb-mode).
+
+RIPPLE_CORAL: Colour = (255, 85, 35)      # Claude coral as the LEDs show it
+RIPPLE_CREAM: Colour = (255, 200, 140)
+RIPPLE_SPEED = 8.0        # key widths per second
+RIPPLE_WIDTH = 0.8        # half-thickness of a ring, in key widths
+RIPPLE_LIFE = 4.0         # seconds until a ring has faded to nothing
+RIPPLE_FLASH = 2.5        # how fast a released key's glow fades, per second
+RAINBOW_HUES = 0.8        # share of the colour wheel the keys span: red..violet, not back to red
+REST_LEVEL = 0.1          # how bright the board looks at rest, 0..1
+LOGO_BREATHE = 4.0        # seconds per logo breath
+# LEDs look far brighter than their drive level at the low end, so levels are
+# worked out as they should look and converted with this before sending.
+LED_GAMMA = 2.2
+
+
+def led_level(look: float) -> float:
+    """How hard to drive an LED (0..1) for it to look this bright (0..1)."""
+    return max(0.0, min(1.0, look)) ** LED_GAMMA
+
+
+def shade(colour: Colour, look: float) -> Colour:
+    return tuple(round(c * led_level(look)) for c in colour)
+
+
+RIPPLE_REST: Colour = shade(RIPPLE_CORAL, REST_LEVEL)
+
+# Linux evdev key codes (linux/input-event-codes.h) -> Cynosa LED names, as
+# runs of consecutive codes; None skips a code with no key on this board. X11
+# keycodes are these plus 8. Physical keys, so the layout setting is irrelevant.
+EVDEV_RUNS: list[tuple[int, list[Optional[str]]]] = [
+    (1, ["Escape", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=",
+         "Backspace", "Tab", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P",
+         "[", "]", "Enter", "Left Control", "A", "S", "D", "F", "G", "H", "J",
+         "K", "L", ";", "'", "`", "Left Shift", "\\ (ANSI)", "Z", "X", "C", "V",
+         "B", "N", "M", ",", ".", "/", "Right Shift", "Number Pad *", "Left Alt",
+         "Space", "Caps Lock", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8",
+         "F9", "F10", "Num Lock", "Scroll Lock", "Number Pad 7", "Number Pad 8",
+         "Number Pad 9", "Number Pad -", "Number Pad 4", "Number Pad 5",
+         "Number Pad 6", "Number Pad +", "Number Pad 1", "Number Pad 2",
+         "Number Pad 3", "Number Pad 0", "Number Pad ."]),
+    (87, ["F11", "F12"]),
+    (96, ["Number Pad Enter", "Right Control", "Number Pad /", "Print Screen",
+          "Right Alt", None, "Home", "Up Arrow", "Page Up", "Left Arrow",
+          "Right Arrow", "End", "Down Arrow", "Page Down", "Insert", "Delete"]),
+    (119, ["Pause/Break"]),
+    (125, ["Left Windows", None, "Menu"]),
+]
+EVDEV_KEYS: dict[int, str] = {code + i: f"Key: {name}"
+                              for code, run in EVDEV_RUNS
+                              for i, name in enumerate(run) if name}
+X_KEYCODE_OFFSET = 8
+
+# The Cynosa's keys as they sit on a US (ANSI) full-size board, row by row from
+# the left edge: a name is a key one key wide, (name, width) a wider key, a bare
+# number an empty gap; widths are in key widths. The function row has half a
+# key of space below it. The tall Number Pad + and Enter span two rows.
+LAYOUT_ROWS: list[tuple[float, list[str | float | tuple[str, float]]]] = [
+    (0.0, ["Escape", 1.0, "F1", "F2", "F3", "F4", 0.5, "F5", "F6", "F7", "F8", 0.5,
+           "F9", "F10", "F11", "F12", 0.25, "Print Screen", "Scroll Lock", "Pause/Break"]),
+    (1.5, ["`", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "-", "=", ("Backspace", 2.0),
+           0.25, "Insert", "Home", "Page Up",
+           0.25, "Num Lock", "Number Pad /", "Number Pad *", "Number Pad -"]),
+    (2.5, [("Tab", 1.5), "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "[", "]",
+           ("\\ (ANSI)", 1.5), 0.25, "Delete", "End", "Page Down",
+           0.25, "Number Pad 7", "Number Pad 8", "Number Pad 9", "Number Pad +"]),
+    (3.5, [("Caps Lock", 1.75), "A", "S", "D", "F", "G", "H", "J", "K", "L", ";", "'",
+           ("Enter", 2.25), 3.5, "Number Pad 4", "Number Pad 5", "Number Pad 6"]),
+    (4.5, [("Left Shift", 2.25), "Z", "X", "C", "V", "B", "N", "M", ",", ".", "/",
+           ("Right Shift", 2.75), 1.25, "Up Arrow",
+           1.25, "Number Pad 1", "Number Pad 2", "Number Pad 3", "Number Pad Enter"]),
+    (5.5, [("Left Control", 1.25), ("Left Windows", 1.25), ("Left Alt", 1.25), ("Space", 6.25),
+           ("Right Alt", 1.25), ("Right Fn", 1.25), ("Menu", 1.25), ("Right Control", 1.25),
+           0.25, "Left Arrow", "Down Arrow", "Right Arrow",
+           0.25, ("Number Pad 0", 2.0), "Number Pad ."]),
+]
+TALL_KEYS = {"Number Pad +", "Number Pad Enter"}
+
+
+def layout_positions(rows: list[tuple[float, list[str | float | tuple[str, float]]]]
+                     ) -> dict[str, tuple[float, float]]:
+    """Pure: LAYOUT_ROWS -> LED name -> (x, y) of the key's middle, in key widths."""
+    pos = {}
+    for y, row in rows:
+        x = 0.0
+        for item in row:
+            if isinstance(item, float):
+                x += item
+                continue
+            name, width = (item, 1.0) if isinstance(item, str) else item
+            pos[f"Key: {name}"] = (x + width / 2, y + (0.5 if name in TALL_KEYS else 0.0))
+            x += width
+    return pos
+
+
+KEY_POSITIONS = layout_positions(LAYOUT_ROWS)
+
+Press = tuple[str, float]   # LED name, monotonic time of the press
+
+
+def raw_keycode(data: bytes) -> int:
+    """X keycode of an XInput2 raw key event, from python-xlib's undecoded
+    payload (deviceid u16, time u32, then detail u32)."""
+    return struct.unpack_from("=I", data, 6)[0]
+
+
+def led_for_x_keycode(keycode: int) -> Optional[str]:
+    return EVDEV_KEYS.get(keycode - X_KEYCODE_OFFSET)
+
+
+def mix(a: Colour, b: Colour, k: float) -> Colour:
+    k = max(0.0, min(1.0, k))
+    return tuple(x + (y - x) * k for x, y in zip(a, b))
+
+
+def key_colours(pos: Mapping[str, tuple[float, float]]) -> dict[str, Colour]:
+    """Pure: key positions -> each key's own ripple colour.
+
+    A rainbow laid diagonally, red at the top left to violet at the bottom
+    right, so neighbouring keys differ a little and the board reads as one sweep.
+    Each channel is converted with led_level, like brightness: a little green
+    drive already looks like a lot, which would turn red into orange."""
+    along = {name: x + y for name, (x, y) in pos.items()}
+    low = min(along.values(), default=0.0)
+    span = (max(along.values(), default=0.0) - low) or 1.0
+    return {name: tuple(round(255 * led_level(x))
+                        for x in colorsys.hsv_to_rgb(RAINBOW_HUES * (a - low) / span, 1.0, 1.0))
+            for name, a in along.items()}
+
+
+def render_ripples(names: list[str], pos: Mapping[str, tuple[float, float]],
+                   presses: Collection[Press], held: Collection[str],
+                   releases: Collection[Press], t: float) -> list[Colour]:
+    """Pure: LED names + key positions (x, y in key widths) + recent key activity + time
+    -> one colour per LED.
+
+    Each press lights a ring of radius age * RIPPLE_SPEED around its key, in
+    that key's colour, fading to nothing by RIPPLE_LIFE. Where rings overlap
+    their colours blend by how bright each is there. A held key glows cream at
+    full brightness; after release the glow fades out the same way."""
+    colours = key_colours(pos)
+    rings = [(pos[name], t - at, colours[name]) for name, at in presses
+             if name in pos and 0 <= t - at < RIPPLE_LIFE]
+    glow: dict[str, float] = {}
+    for name, at in releases:
+        age = t - at
+        if 0 <= age < RIPPLE_LIFE:
+            glow[name] = max(glow.get(name, 0.0),
+                             math.exp(-age * RIPPLE_FLASH) * (1 - age / RIPPLE_LIFE))
+    glow.update(dict.fromkeys(held, 1.0))
+    frame = []
+    for name in names:
+        if name == "Logo":
+            frame.append(shade(RIPPLE_CORAL, 0.35 + 0.65 * breathe(t, LOGO_BREATHE)))
+            continue
+        here = pos.get(name)
+        if here is None:
+            frame.append(RIPPLE_REST)
+            continue
+        ring = 0.0
+        tint = [0.0, 0.0, 0.0]
+        for (x, y), age, colour in rings:
+            d = math.hypot(here[0] - x, here[1] - y)
+            w = math.exp(-((d - age * RIPPLE_SPEED) / RIPPLE_WIDTH) ** 2) * (1 - age / RIPPLE_LIFE)
+            ring += w
+            tint = [x + w * y for x, y in zip(tint, colour)]
+        # The resting coral blends in only while the rings here are fainter than
+        # the rest level: a faint tail tints the key a little, a ring owns it.
+        rest = max(0.0, REST_LEVEL - ring)
+        tint = [x + rest * y for x, y in zip(tint, RIPPLE_CORAL)]
+        base = tuple(x / (rest + ring) for x in tint)
+        flash = glow.get(name, 0.0)
+        look = max(REST_LEVEL, min(1.0, ring + flash))
+        frame.append(shade(mix(base, RIPPLE_CREAM, flash), look))
+    return frame
+
+
 # --- transcript ----------------------------------------------------------------
 
-def busy_from_transcript(path: Optional[str], now: Optional[float] = None,
-                         max_age: Optional[float] = BUSY_MAX_AGE) -> bool:
-    """Is this session mid-turn? Scan the transcript tail backwards for the
-    last entry that says anything about turn state:
+LOCAL_CAVEAT = "<local-command-caveat>"
+LOCAL_OUTPUT = ("<local-command-stdout>", "<local-command-stderr>")
+
+
+def user_text(e: dict) -> str:
+    content = (e.get("message") or {}).get("content")
+    return content if isinstance(content, str) else ""
+
+
+def stamp(e: dict) -> Optional[float]:
+    try:
+        return datetime.fromisoformat(e["timestamp"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def turn_rows(tail: bytes) -> Iterator[dict]:
+    """The rows of a transcript tail that may say something about turn
+    state, newest first. Metadata rows (ai-title, mode, api-request,
+    artifact ledgers, ...) are dropped, and so are user rows that are no
+    prompt: a compaction summary (compaction happens both between turns and
+    mid-turn) and a local slash command's output."""
+    for line in reversed(tail.splitlines()):
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        kind = e.get("type")
+        if (kind in ("assistant", "continued-in")
+                or kind == "system" and e.get("subtype") == "turn_duration"
+                or kind == "user" and not e.get("isCompactSummary")
+                and not user_text(e).startswith(LOCAL_OUTPUT)):
+            yield e
+
+
+def turn_from_transcript(path: Optional[str]) -> tuple[bool, Optional[float]]:
+    """(mid-turn?, when) from the last transcript row that says anything
+    about turn state:
       user prompt / tool_result  -> Claude owes a response      -> busy
       assistant (tool_use etc.)  -> tool running or streaming   -> busy
       system/turn_duration       -> turn finished               -> idle,
@@ -299,38 +528,35 @@ def busy_from_transcript(path: Optional[str], now: Optional[float] = None,
                                     background agents still run -> busy
       '[Request interrupted ...' -> user hit Esc                -> idle
       continued-in               -> session handed off elsewhere -> idle
-    Metadata rows (ai-title, mode, api-request, ...) are skipped, and so is
-    a compaction summary: it is written as a user row but is no prompt, and
-    compaction happens both between turns and mid-turn.
-    max_age=None disables the silence cap (a dialog can sit for hours)."""
-    now = time.time() if now is None else now
+    A local slash command (/model, /config, ...) is a caveat row followed
+    by a user row with the command; it runs without Claude and is skipped.
+    `when` is that row's own timestamp, None if it has none: the file's
+    mtime is no use, as Claude Code appends rows to sessions idle for hours."""
     if not path:
-        return False
+        return False, None
     try:
-        st = os.stat(path)
-        if max_age is not None and now - st.st_mtime > max_age:
-            return False
         with open(path, "rb") as fh:
-            fh.seek(max(0, st.st_size - 512 * 1024))
+            fh.seek(max(0, os.fstat(fh.fileno()).st_size - 512 * 1024))
             tail = fh.read()
     except OSError:
-        return False
-    for line in reversed(tail.splitlines()):
-        try:
-            e = json.loads(line)
-        except ValueError:
-            continue
+        return False, None
+    rows = turn_rows(tail)
+    for e in rows:
         kind = e.get("type")
-        if kind == "system" and e.get("subtype") == "turn_duration":
-            return bool(e.get("pendingBackgroundAgentCount"))
+        if kind == "system":
+            return bool(e.get("pendingBackgroundAgentCount")), stamp(e)
         if kind == "continued-in":
-            return False
+            return False, stamp(e)
         if kind == "assistant":
-            return True
-        if kind == "user" and not e.get("isCompactSummary"):
-            content = (e.get("message") or {}).get("content")
-            return not (isinstance(content, str) and content.startswith("[Request interrupted"))
-    return False
+            return True, stamp(e)
+        text = user_text(e)
+        if text.startswith(LOCAL_CAVEAT):
+            continue
+        older = next(rows, None)
+        if older is not None and user_text(older).startswith(LOCAL_CAVEAT):
+            continue
+        return not text.startswith("[Request interrupted"), stamp(e)
+    return False, None
 
 
 def subagent_activity(transcript: Optional[str]) -> float:
@@ -475,11 +701,12 @@ def load_sessions(state_dir: str, max_age: float, now: float,
         if not isinstance(p, dict) or not p.get("session_id"):
             continue    # not a mirror file (targets.json lives here too)
         transcript = p.get("transcript_path")
-        try:
-            activity = os.stat(transcript).st_mtime
-        except (TypeError, OSError):
-            activity = mtime
-        mid_turn = busy_from_transcript(transcript, now, max_age=None)
+        mid_turn, activity = turn_from_transcript(transcript)
+        if activity is None:
+            try:
+                activity = os.stat(transcript).st_mtime
+            except (TypeError, OSError):
+                activity = mtime
         if mid_turn:
             # Subagents (foreground or background) work while the session's
             # own transcript stays silent; their writes are its activity.
@@ -831,7 +1058,166 @@ def pane_screen(pane: str) -> str:
 
 # --- daemon ------------------------------------------------------------------------
 
+RESCAN_DEVICES = 140    # OpenRGB SDK packet id; openrgb-python has no call for it
+
+
+def request_rescan(host: str, port: int) -> None:
+    """Ask the OpenRGB server to look for devices again.
+
+    OpenRGB only detects devices at startup. At boot it can start before the
+    desktop login gives this user access to the keyboard, find nothing, and
+    never look again, so ask it again whenever the keyboard is missing."""
+    with socket.create_connection((host, port), timeout=5) as s:
+        s.sendall(struct.pack("<4sIII", b"ORGB", 0, RESCAN_DEVICES, 0))
+
+
+RGB_MODES = ("info", "ripples")
+# Asks for 45 frames/s; drawing time adds to each sleep, so about 35 reach the keyboard.
+# Tested by eye up to that rate on 2026-11-19. A 30/s run on 2026-11-16 froze the Cynosa
+# (see README); if it comes back, lower this.
+RIPPLE_TICK = 1 / 45
+
+
+def default_slots_path() -> str:
+    return os.environ.get(
+        "CLAUDE_RGB_SLOTS",
+        os.path.join(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+                     "claude-rgb", "slots.json"))
+
+
+def default_mode_path() -> str:
+    return os.path.join(os.path.dirname(default_slots_path()), "mode")
+
+
+def read_rgb_mode(path: str) -> str:
+    """The look chosen with claude-rgb-mode; anything unreadable means "info"."""
+    try:
+        with open(path) as f:
+            mode = f.read().strip()
+    except OSError:
+        return "info"
+    return mode if mode in RGB_MODES else "info"
+
+
+def mode_command(args: list[str], path: str) -> int:
+    """claude-rgb-mode [info|ripples|toggle]: set the look (default: toggle)."""
+    want = args[0] if args else "toggle"
+    if want == "toggle":
+        want = "info" if read_rgb_mode(path) == "ripples" else "ripples"
+    if want not in RGB_MODES:
+        print(f"usage: claude-rgb-mode [{'|'.join(RGB_MODES)}|toggle]", file=sys.stderr)
+        return 2
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(want + "\n")
+    os.replace(tmp, path)
+    print(want)
+    return 0
+
+
+class KeyPresses:
+    """Key presses and releases from the X11 desktop, while enabled. Keeps only
+    which key and when, in memory, for the life of a ripple, plus which keys
+    are down; never what was typed. Disabled, it holds no X connection, so
+    nothing is listened to."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._presses: deque[Press] = deque(maxlen=64)
+        self._releases: deque[Press] = deque(maxlen=64)
+        self._held: set[str] = set()
+        self._want = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def enable(self, on: bool) -> None:
+        if not on:
+            self._want.clear()
+            self._forget()
+            return
+        self._want.set()
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, name="keys", daemon=True)
+            self._thread.start()
+
+    def record(self, led: str, down: bool, at: float) -> None:
+        with self._lock:
+            if not down:
+                self._held.discard(led)
+                self._releases.append((led, at))
+            elif led not in self._held:       # not a repeat of a key already down
+                self._held.add(led)
+                self._presses.append((led, at))
+
+    def recent(self, now: float) -> list[Press]:
+        with self._lock:
+            return [p for p in self._presses if now - p[1] < RIPPLE_LIFE]
+
+    def releases(self, now: float) -> list[Press]:
+        with self._lock:
+            return [p for p in self._releases if now - p[1] < RIPPLE_LIFE]
+
+    def held(self) -> set[str]:
+        with self._lock:
+            return set(self._held)
+
+    def _forget(self) -> None:
+        with self._lock:
+            self._presses.clear()
+            self._releases.clear()
+            self._held.clear()
+
+    def _run(self) -> None:
+        from Xlib import display
+        from Xlib.ext import xinput
+
+        failed = None
+        while True:
+            self._want.wait()
+            try:
+                d = display.Display()
+                try:
+                    d.screen().root.xinput_select_events(
+                        [(xinput.AllMasterDevices, xinput.RawKeyPressMask | xinput.RawKeyReleaseMask)])
+                    d.flush()
+                    if failed:
+                        print("claude-rgb: listening to key presses again", flush=True)
+                    failed = None
+                    while self._want.is_set():
+                        select.select([d], [], [], 0.5)
+                        while d.pending_events():
+                            e = d.next_event()
+                            if (e.type == d.extension_event.GenericEvent
+                                    and e.evtype in (xinput.RawKeyPress, xinput.RawKeyRelease)):
+                                led = led_for_x_keycode(raw_keycode(bytes(e.data)))
+                                if led:
+                                    self.record(led, e.evtype == xinput.RawKeyPress, time.monotonic())
+                finally:
+                    d.close()
+                    with self._lock:
+                        self._held.clear()     # releases while not listening would be missed
+            except Exception as e:  # no desktop yet, X restarted, ...: retry
+                if str(e) != failed:
+                    print(f"claude-rgb: key presses unavailable ({e.__class__.__name__}: {e}); retrying", flush=True)
+                failed = str(e)
+                time.sleep(5)
+
+
+def server_has_news(sock: socket.socket) -> bool:
+    """True if the OpenRGB server has sent something unasked, without waiting.
+
+    Once connected the daemon only sends colours, which get no reply, so
+    anything to read is a "device list changed" notice (the keyboard was
+    unplugged and came back as a new device) or the server closing the
+    connection. Either way the device the daemon holds is no longer live."""
+    readable, _, _ = select.select([sock], [], [], 0)
+    return bool(readable)
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["mode"]:
+        return mode_command(sys.argv[2:], default_mode_path())
+
     from openrgb import OpenRGBClient
     from openrgb.utils import RGBColor
 
@@ -841,10 +1227,8 @@ def main() -> int:
     state_dir = os.environ.get(
         "CLAUDE_RGB_STATE_DIR",
         os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "claude-rgb"))
-    slots_path = os.environ.get(
-        "CLAUDE_RGB_SLOTS",
-        os.path.join(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
-                     "claude-rgb", "slots.json"))
+    slots_path = default_slots_path()
+    mode_path = default_mode_path()
     max_age = float(os.environ.get("CLAUDE_RGB_MAX_AGE", "30"))
     tick = float(os.environ.get("CLAUDE_RGB_TICK", "0.125"))
     stats_every = 0.5    # tmux lookups (focus, dialog screens) happen at this rate
@@ -855,6 +1239,10 @@ def main() -> int:
 
     client = dev = None
     names: list[str] = []
+    rgb_mode = read_rgb_mode(mode_path)
+    keys = KeyPresses()
+    keys.enable(rgb_mode == "ripples")
+    print(f"claude-rgb: mode {rgb_mode}", flush=True)
     last: Optional[list[Colour]] = None
     stats, stats_at = None, -1.0
     viewed: dict[str, float] = {}       # pane -> wall time last focused
@@ -867,6 +1255,7 @@ def main() -> int:
                 client = OpenRGBClient(host, port, "claude-rgb")
                 cands = [d for d in client.devices if match in d.name.lower()]
                 if not cands:
+                    request_rescan(host, port)    # the next retry sees the new list
                     raise RuntimeError(f"no device matching {match!r}: {[d.name for d in client.devices]}")
                 dev = cands[0]
                 dev.set_mode("Direct")
@@ -876,6 +1265,13 @@ def main() -> int:
 
             now = time.monotonic()
             if now - stats_at >= stats_every:
+                if server_has_news(client.comms.sock):
+                    raise RuntimeError("OpenRGB device list changed")
+                want = read_rgb_mode(mode_path)
+                if want != rgb_mode:
+                    rgb_mode = want
+                    keys.enable(rgb_mode == "ripples")
+                    print(f"claude-rgb: mode {rgb_mode}", flush=True)
                 wall = time.time()
                 focus = focused_pane()
                 if focus:
@@ -901,7 +1297,11 @@ def main() -> int:
                                    limits=limits.latest(), bg=bg_views(sessions, bgslots),
                                    mode=modes.get(focus or ""))
                 stats_at = now
-            frame = render(names, stats, now)
+            if rgb_mode == "ripples":
+                frame = render_ripples(names, KEY_POSITIONS, keys.recent(now), keys.held(),
+                                       keys.releases(now), now)
+            else:
+                frame = render(names, stats, now)
             if frame != last:
                 dev.set_colors([RGBColor(*c) for c in frame], fast=True)
                 last = frame
@@ -917,7 +1317,7 @@ def main() -> int:
             client = dev = None
             time.sleep(5)
             continue
-        time.sleep(tick)
+        time.sleep(RIPPLE_TICK if rgb_mode == "ripples" else tick)
 
 
 if __name__ == "__main__":

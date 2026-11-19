@@ -17,8 +17,9 @@ shortcuts (the lighting works without either).
    (AppImageLauncher's binfmt hook otherwise intercepts it). Check
    `openrgb --list-devices` sees your keyboard; add OpenRGB's udev rules if not.
 2. `./install.sh` creates the venv, installs the two `systemd --user` units,
-   symlinks `claude-goto` into `~/.local/bin` and registers the 22 GNOME
-   shortcuts (Ctrl+Alt + the session row and the background row).
+   symlinks `claude-goto` and `claude-rgb-mode` into `~/.local/bin` and
+   registers the 23 GNOME shortcuts (Ctrl+Alt + the session row and the
+   background row, and Ctrl+Alt+R for ripples mode).
 3. Paste `statusline-hook.sh` into your Claude Code statusline script right
    after it reads stdin into `$input` (set `statusLine.command` in
    `~/.claude/settings.json` if you have none; any script that prints a line
@@ -45,8 +46,11 @@ No fresh session for 30 s -> everything off, dim logo.
 
 "Mid-turn" is read from the session's transcript tail: the last turn-state
 entry is a user prompt / tool_result or an assistant message -> busy; a
-`system/turn_duration` row or "[Request interrupted" -> idle, except that a
-`turn_duration` with a non-zero `pendingBackgroundAgentCount` is still busy:
+`system/turn_duration` row or "[Request interrupted" -> idle. User rows that
+are no prompt are skipped: a compaction summary, and a local slash command
+(`/model`, `/config`, ...: a `<local-command-caveat>` row, the command, its
+output), which runs without Claude. A `turn_duration` with a non-zero
+`pendingBackgroundAgentCount` is still busy:
 the session is waiting for its background agents and will pick up their
 results in a new turn. A session silent for 15 min is never busy; while it is
 mid-turn, writes to its subagents' transcripts (`<session>/subagents/`) count
@@ -70,8 +74,39 @@ lines so a footer quoted in the conversation does not count. A dialog hides
 the footer; the pane keeps its last mode until it returns.
 
 "Finished since you last looked" (steady blue) uses the daemon's own focus
-tracking: the pane's transcript changed after the pane was last focused.
+tracking: the session's last turn-state entry (above) is timestamped after
+the pane was last focused. The transcript's mtime would not do: Claude Code
+keeps appending rows to sessions idle for hours (titles, modes, artifact
+ledgers, idle compaction).
 Everything counts as seen at daemon start, so a restart is not a wall of blue.
+
+## Ripples mode
+Ctrl+Alt+R (`claude-rgb-mode`, or `claude-rgb-mode info|ripples|toggle`)
+swaps the layout above for a look with no session info: the keys rest nearly
+dark coral, the logo breathes, and each key you press flashes cream and sends a
+ring in its own colour across the board that fades to nothing within 4 s
+(`RIPPLE_LIFE`). Key colours are a rainbow laid diagonally, red at the top left
+to violet at the bottom right (`key_colours`); where rings cross, their colours blend.
+Rings spread from where each key really sits on a US full-size board
+(`LAYOUT_ROWS`: key widths, gaps, offset rows), not OpenRGB's LED grid, which
+puts every key in one cell of a straight 6 × 22 grid. A held key stays lit until you let go, then fades the same
+way; X sends no events while a key is held, so key releases are tracked too. Brightness is worked out as it should look and converted for
+the LEDs (`LED_GAMMA`), because LEDs look far brighter than their drive level
+at the low end: 10% drive already reads as a light glow. The choice is
+kept in `~/.local/state/claude-rgb/mode`, so it survives restarts; the daemon
+re-reads it twice a second.
+
+Key presses come from the X11 desktop (XInput2 raw key events on the root
+window, through `python-xlib`), so no extra permissions are needed, but it
+needs an X11 session and does nothing on Wayland. Only which key went down or up
+and when is kept, in memory, for the life of a ring, plus which keys are down; the X connection is closed
+while the info layout is showing. Keys map by their evdev code
+(`EVDEV_RUNS` in `claude_rgb.py`), so the keyboard layout setting does not
+matter. Sessions are still tracked in ripples mode, so Ctrl+Alt+<key> jumps
+keep working. Ripples ask for 45 frames per second (about 35 reach the keyboard, since drawing
+time adds to each wait), the info layout for 8. Once, at 30, the Cynosa stopped taking frames
+until it was reset and OpenRGB restarted; that did not happen again when rates up to about 35
+were tried on 2026-11-19.
 
 ## Slots and Ctrl+Alt+<key>
 Slots are keyed by session_id, first free wins, and persisted in

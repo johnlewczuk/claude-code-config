@@ -1,0 +1,6 @@
+#!/bin/bash
+# claude-rgb-mode [info|ripples|toggle]: switch the keyboard between the info
+# layout and the ripples look (default: toggle). Bound to Ctrl+Alt+R as a GNOME
+# global shortcut by install.sh. The daemon picks the change up within 0.5 s.
+here=$(dirname "$(readlink -f "$0")")
+exec "$here/venv/bin/python" "$here/claude_rgb.py" mode "$@"

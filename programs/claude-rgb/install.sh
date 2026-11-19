@@ -10,6 +10,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 
 mkdir -p ~/.local/bin ~/.config/systemd/user
 ln -sf "$here/claude-goto" ~/.local/bin/claude-goto
+ln -sf "$here/claude-rgb-mode" ~/.local/bin/claude-rgb-mode
 for u in openrgb-server claude-rgb; do
     sed "s|%h/.local/opt/openrgb-claude|$here|g" "$here/systemd/$u.service" > ~/.config/systemd/user/$u.service
 done
@@ -19,9 +20,10 @@ systemctl --user enable --now openrgb-server.service claude-rgb.service
 # Ctrl+Alt+<key> -> claude-goto for the session row (1..=) and the background
 # row (Z../), as GNOME global shortcuts (see README for why these cannot be
 # tmux bindings). Each entry is <GNOME key name>:<label claude_rgb.py uses>.
+# Ctrl+Alt+R -> claude-rgb-mode flips between the info layout and ripples.
 base=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings
 if command -v gsettings >/dev/null; then
-    existing=$(gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings | tr -d "[]' " | tr ',' '\n' | grep -v '^$' | grep -v claude-goto || true)
+    existing=$(gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings | tr -d "[]' " | tr ',' '\n' | grep -v '^$' | grep -v -e claude-goto -e claude-rgb-mode || true)
     paths=()
     i=0
     for kl in 1:1 2:2 3:3 4:4 5:5 6:6 7:7 8:8 9:9 0:0 minus:- equal:= \
@@ -34,6 +36,11 @@ if command -v gsettings >/dev/null; then
         gsettings set "$s" command "$HOME/.local/bin/claude-goto '$label'"
         i=$((i+1))
     done
+    p="$base/claude-rgb-mode/"; paths+=("$p")
+    s="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$p"
+    gsettings set "$s" name "claude-rgb-mode"
+    gsettings set "$s" binding "<Control><Alt>r"
+    gsettings set "$s" command "$HOME/.local/bin/claude-rgb-mode"
     all=$(printf "'%s'," $existing "${paths[@]}"); all="[${all%,}]"
     gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "$all"
 fi
