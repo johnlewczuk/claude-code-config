@@ -1,5 +1,7 @@
 """Tests for the pure logic of claude_rgb (no OpenRGB / tmux)."""
+import colorsys
 import json
+import math
 import os
 import time
 
@@ -150,33 +152,47 @@ TURN_DONE = {"type": "system", "subtype": "turn_duration"}
 META = {"type": "ai-title"}
 INTERRUPTED = {"type": "user", "message": {"role": "user", "content": "[Request interrupted by user]"}}
 HANDOFF = {"type": "continued-in", "continuedInSessionId": "other"}
+CAVEAT = {"type": "user", "isMeta": True, "message": {"role": "user", "content": "<local-command-caveat>The command below was run directly ...</local-command-caveat>"}}
+
+
+def said(content):
+    return {"type": "user", "message": {"role": "user", "content": content}}
+
+
+def at(entry, t):
+    """entry as Claude Code stamps it, written at time t (whole seconds)."""
+    return dict(entry, timestamp=time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t)))
+
+
+def busy(path):
+    return cr.turn_from_transcript(str(path))[0]
 
 
 def test_busy_when_turn_in_progress(tmp_path):
     t = tmp_path / "t.jsonl"
     t.write_text(jl(USER_PROMPT, {"type": "api-request"}))
-    assert cr.busy_from_transcript(str(t)) is True
+    assert busy(t) is True
     t.write_text(jl(USER_PROMPT, ASSIST_TOOL))
-    assert cr.busy_from_transcript(str(t)) is True
+    assert busy(t) is True
     t.write_text(jl(ASSIST_TOOL, TOOL_RESULT, META))
-    assert cr.busy_from_transcript(str(t)) is True
+    assert busy(t) is True
 
 
 def test_idle_after_turn_ends_or_interrupt(tmp_path):
     t = tmp_path / "t.jsonl"
     t.write_text(jl(USER_PROMPT, ASSIST_END, TURN_DONE, META, META))
-    assert cr.busy_from_transcript(str(t)) is False
+    assert busy(t) is False
     t.write_text(jl(USER_PROMPT, ASSIST_TOOL, INTERRUPTED))
-    assert cr.busy_from_transcript(str(t)) is False
-    assert cr.busy_from_transcript(str(tmp_path / "nope.jsonl")) is False
+    assert busy(t) is False
+    assert busy(tmp_path / "nope.jsonl") is False
 
 
 def test_busy_while_turn_ended_with_background_agents_pending(tmp_path):
     t = tmp_path / "t.jsonl"
     t.write_text(jl(USER_PROMPT, ASSIST_END, dict(TURN_DONE, pendingBackgroundAgentCount=2), META))
-    assert cr.busy_from_transcript(str(t)) is True
+    assert busy(t) is True
     t.write_text(jl(USER_PROMPT, ASSIST_END, dict(TURN_DONE, pendingBackgroundAgentCount=0)))
-    assert cr.busy_from_transcript(str(t)) is False
+    assert busy(t) is False
 
 
 def test_subagent_writes_keep_a_waiting_session_working(tmp_path):
@@ -203,9 +219,9 @@ def test_compaction_does_not_change_turn_state(tmp_path):
                "message": {"role": "user", "content": "This session is being continued ..."}}
     t = tmp_path / "t.jsonl"
     t.write_text(jl(USER_PROMPT, ASSIST_END, TURN_DONE, boundary, summary, {"type": "attachment"}, META))
-    assert cr.busy_from_transcript(str(t)) is False
+    assert busy(t) is False
     t.write_text(jl(USER_PROMPT, ASSIST_TOOL, boundary, summary))
-    assert cr.busy_from_transcript(str(t)) is True
+    assert busy(t) is True
 
 
 def test_idle_after_session_handed_off_even_with_recent_writes(tmp_path):
@@ -213,16 +229,53 @@ def test_idle_after_session_handed_off_even_with_recent_writes(tmp_path):
     # rows (cost-state) keep the file fresh: it must still read as idle
     t = tmp_path / "t.jsonl"
     t.write_text(jl(USER_PROMPT, ASSIST_TOOL, HANDOFF, {"type": "cost-state"}))
-    assert cr.busy_from_transcript(str(t)) is False
+    assert busy(t) is False
 
 
-def test_stale_transcript_is_not_busy(tmp_path):
+def test_local_slash_commands_do_not_start_a_turn(tmp_path):
+    """/model, /config, ... run without Claude: a caveat row, then the
+    command and its output (as user rows, or as a system row)."""
     t = tmp_path / "t.jsonl"
-    t.write_text(jl(USER_PROMPT))
-    old = time.time() - 3600
-    os.utime(t, (old, old))
-    assert cr.busy_from_transcript(str(t)) is False
-    assert cr.busy_from_transcript(str(t), max_age=None) is True
+    command = said("<command-name>/model</command-name>\n<command-message>model</command-message>")
+    output = said("<local-command-stdout>Kept model as `Opus 5.5`</local-command-stdout>")
+    t.write_text(jl(ASSIST_END, TURN_DONE, CAVEAT, command, output, META))
+    assert busy(t) is False
+    t.write_text(jl(ASSIST_END, TURN_DONE, CAVEAT, said("/code-review high #232"),
+                    {"type": "system", "subtype": "local_command", "content": "<local-command-stdout>..."}))
+    assert busy(t) is False
+    t.write_text(jl(ASSIST_END, TURN_DONE, CAVEAT, command, output, said("hi claude")))
+    assert busy(t) is True                         # a prompt typed after one is a prompt
+    skill = said("<command-message>review-until-clean</command-message>\n<command-name>/review-until-clean</command-name>")
+    t.write_text(jl(ASSIST_END, TURN_DONE, skill, dict(said("Base directory for this skill: ..."), isMeta=True)))
+    assert busy(t) is True                         # a skill command is a prompt
+
+
+def test_turn_time_is_the_deciding_row_not_the_file_mtime(tmp_path):
+    """Claude Code appends rows to sessions idle for hours (titles, modes,
+    artifact ledgers, idle compaction); none of it is the session acting."""
+    t = tmp_path / "t.jsonl"
+    t.write_text(jl(at(USER_PROMPT, 1000), at(ASSIST_END, 1010), at(TURN_DONE, 1011), META,
+                    {"type": "artifact-autoreact-ledger"}, at({"type": "system", "subtype": "compact_boundary"}, 5000),
+                    at({"type": "user", "isCompactSummary": True, "message": {"content": "..."}}, 5000),
+                    at(CAVEAT, 6000), at(said("<command-name>/model</command-name>"), 6000)))
+    assert cr.turn_from_transcript(str(t)) == (False, 1011)
+    t.write_text(jl(at(USER_PROMPT, 1000), at(ASSIST_TOOL, 1020), {"type": "api-request"}))
+    assert cr.turn_from_transcript(str(t)) == (True, 1020)
+    t.write_text(jl(USER_PROMPT, ASSIST_END, TURN_DONE))
+    assert cr.turn_from_transcript(str(t)) == (False, None)   # unstamped: unknown
+    assert cr.turn_from_transcript(str(tmp_path / "nope.jsonl")) == (False, None)
+
+
+def test_idle_session_written_to_later_is_not_unread(tmp_path):
+    now = time.time()
+    t = tmp_path / "s.jsonl"
+    t.write_text(jl(at(USER_PROMPT, now - 7200), at(ASSIST_END, now - 7190), at(TURN_DONE, now - 7190),
+                    {"type": "artifact-autoreact-ledger"}))           # mtime: now
+    write(tmp_path / "s.json", t, tmux_pane="%1")
+    s = cr.load_sessions(str(tmp_path), 30, now, lambda p: "", {"%1": "claude"})[0]
+    assert s.activity == int(now - 7190)
+    assert s.state(viewed_at=now - 3600) is State.IDLE                # looked after it finished
+    assert s.state(viewed_at=now - 7200) is State.UNREAD              # finished after you looked
 
 
 PERM_SCREEN = " Do you want to proceed?\n ❯ 1. Yes\n   2. No\n Esc to cancel · Tab to amend\n"
@@ -792,3 +845,222 @@ def test_load_sessions_ignores_targets_json_and_other_non_mirror_files(tmp_path)
     cr.write_targets(str(tmp_path), {"Z": {"session": "real", "pane": None}})
     (tmp_path / "list.json").write_text("[1, 2]")
     assert [s.id for s in cr.load_sessions(str(tmp_path), 30, now, lambda p: "", {})] == ["real"]
+
+
+# --- OpenRGB rescan -----------------------------------------------------------
+
+def test_request_rescan_sends_one_rescan_header():
+    import socket
+    import struct
+    import threading
+
+    srv = socket.create_server(("127.0.0.1", 0))
+    srv.settimeout(5)
+    got = []
+
+    def serve():
+        conn, _ = srv.accept()
+        with conn:
+            got.append(conn.recv(64))
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    try:
+        cr.request_rescan("127.0.0.1", srv.getsockname()[1])
+        t.join(5)
+    finally:
+        srv.close()
+    assert got == [struct.pack("<4sIII", b"ORGB", 0, 140, 0)]
+
+
+# --- ripples mode ----------------------------------------------------------------
+
+# Two raw key events captured from this X server (Left Shift, Right Shift).
+RAW_LSHIFT = bytes.fromhex("0300eaa0d61a32000000050002000000000000000000")
+RAW_RSHIFT = bytes.fromhex("030018a2d61a3e000000050002000000000000000000")
+
+
+def test_raw_keycode_reads_the_x_keycode_from_a_raw_event():
+    assert cr.raw_keycode(RAW_LSHIFT) == 50
+    assert cr.raw_keycode(RAW_RSHIFT) == 62
+
+
+def test_led_for_x_keycode_follows_physical_keys():
+    assert cr.led_for_x_keycode(50) == "Key: Left Shift"     # evdev 42
+    assert cr.led_for_x_keycode(36 + 8) == "Key: J"
+    assert cr.led_for_x_keycode(57 + 8) == "Key: Space"
+    assert cr.led_for_x_keycode(96 + 8) == "Key: Number Pad Enter"
+    assert cr.led_for_x_keycode(99 + 8) == "Key: Print Screen"
+    assert cr.led_for_x_keycode(127 + 8) == "Key: Menu"
+    assert cr.led_for_x_keycode(101 + 8) is None              # no such key on the board
+    assert cr.led_for_x_keycode(3) is None
+
+
+def test_evdev_table_names_each_led_once():
+    leds = list(cr.EVDEV_KEYS.values())
+    assert len(leds) == len(set(leds)) == 103                  # every key but Fn
+
+
+def test_layout_places_keys_where_a_us_keyboard_has_them():
+    p = cr.KEY_POSITIONS
+    assert p["Key: Escape"] == (0.5, 0.0)
+    assert p["Key: Q"][0] - p["Key: 1"][0] == 0.5                # each row is offset sideways
+    assert p["Key: A"][0] - p["Key: Q"][0] == 0.25
+    assert p["Key: Z"][0] - p["Key: A"][0] == 0.5
+    assert p["Key: 1"][1] - p["Key: F1"][1] == 1.5              # half a key of space under F1..F12
+    assert p["Key: Space"] == (6.875, 5.5)                      # middle of a 6.25-wide key
+    assert p["Key: Number Pad +"] == (22.0, 3.0)                # between the 7-9 and 4-6 rows
+    for left, right in [("Backspace", "Insert"), ("Page Up", "Num Lock"), ("Right Shift", "Up Arrow")]:
+        assert p[f"Key: {right}"][0] > p[f"Key: {left}"][0] + 1  # gaps between key groups
+    # The numpad's left column lines up.
+    assert {p[f"Key: {k}"][0] for k in ("Number Pad 7", "Number Pad 4", "Number Pad 1", "Num Lock")} == {19.0}
+    assert len(set(p.values())) == len(p)                       # no two keys in one spot
+
+
+def test_every_key_the_listener_can_report_has_a_position():
+    assert set(cr.EVDEV_KEYS.values()) <= set(cr.KEY_POSITIONS)
+
+
+# A full-width test board, (x, y) in key widths: row 2 has keys in every column.
+RIPPLE_POS = {f"Key: C{c}": (c, 2) for c in range(22)} | {"Key: Esc": (1, 0), "Key: Numpad": (20, 5)}
+RIPPLE_NAMES = ["Logo", ""] + list(RIPPLE_POS)
+
+
+def lum(c):
+    return sum(c)
+
+
+def ripples_at_keys(presses, t, held=(), releases=None):
+    if releases is None:                                        # a plain tap: released at once
+        releases = presses
+    return dict(zip(RIPPLE_NAMES, cr.render_ripples(RIPPLE_NAMES, RIPPLE_POS, presses, held, releases, t)))
+
+
+def ripples_at(presses, t):
+    return ripples_at_keys(presses, t)
+
+
+def test_rest_is_truly_dim_with_a_breathing_logo():
+    a = cr.render_ripples(RIPPLE_NAMES, RIPPLE_POS, [], (), [], 0.0)
+    b = cr.render_ripples(RIPPLE_NAMES, RIPPLE_POS, [], (), [], cr.LOGO_BREATHE / 2)
+    assert set(a[1:]) == {cr.RIPPLE_REST}
+    assert max(cr.RIPPLE_REST) <= 3                             # LEDs look bright at 10%+
+    assert a[0] != b[0]                                         # logo moves
+    assert lum(a[0]) > lum(cr.RIPPLE_REST)
+
+
+def test_a_press_flashes_its_key_and_its_ring_reaches_far_keys_later():
+    presses = [("Key: C5", 10.0)]
+    assert lum(ripples_at(presses, 10.0)["Key: C5"]) > 400       # bright, toward cream
+    far = [lum(ripples_at(presses, 10.0 + i / 30)["Key: C14"]) for i in range(40)]
+    assert far[0] == lum(cr.RIPPLE_REST)                        # ring not there yet
+    peak = max(range(40), key=far.__getitem__) / 30
+    assert abs(peak - 9 / cr.RIPPLE_SPEED) < 0.1                # 9 columns away
+    assert max(far) > far[0]
+
+
+def test_key_colours_run_red_to_violet_across_the_board():
+    colours = cr.key_colours(RIPPLE_POS)
+    hues = [colorsys.rgb_to_hsv(*(x / 255 for x in colours[f"Key: C{c}"]))[0] for c in range(22)]
+    assert hues == sorted(hues)                                 # one sweep, never back to red
+    assert hues[0] < 0.1 and hues[-1] > 0.5                     # red-ish to blue-ish
+    assert colours["Key: Esc"] == (255, 0, 0)                   # the top-left key is pure red
+    assert len(set(colours.values())) > 15                      # neighbours differ
+    assert cr.key_colours({}) == {}
+
+
+def test_each_ring_carries_its_own_keys_colour():
+    colours = cr.key_colours(RIPPLE_POS)
+
+    def unit(c):
+        n = math.sqrt(sum(x * x for x in c))
+        return [x / n for x in c]
+
+    def closeness(a, b):
+        return sum(x * y for x, y in zip(unit(a), unit(b)))
+
+    t = 10.0 + 8 / cr.RIPPLE_SPEED                              # both rings 8 columns out, at C10
+    left = ripples_at([("Key: C2", 10.0)], t)["Key: C10"]
+    right = ripples_at([("Key: C18", 10.0)], t)["Key: C10"]
+    assert closeness(left, colours["Key: C2"]) > closeness(left, colours["Key: C18"])
+    assert closeness(right, colours["Key: C18"]) > closeness(right, colours["Key: C2"])
+    assert closeness(left, colours["Key: C2"]) > 0.95
+
+
+def test_ripples_fade_smoothly_and_are_gone_after_their_life():
+    presses = [("Key: C5", 10.0)]
+    late = ripples_at(presses, 10.0 + cr.RIPPLE_LIFE - 0.05)
+    assert all(lum(c) - lum(cr.RIPPLE_REST) <= 3 for n, c in late.items() if n != "Logo")
+    gone = ripples_at(presses, 10.0 + cr.RIPPLE_LIFE)
+    assert {c for n, c in gone.items() if n != "Logo"} == {cr.RIPPLE_REST}
+
+
+def test_the_pressed_key_fades_without_jumping():
+    presses = [("Key: C5", 10.0)]
+    drive = [lum(ripples_at(presses, 10.0 + i / 15)["Key: C5"]) for i in range(round(cr.RIPPLE_LIFE * 15))]
+    looks = [(d / drive[0]) ** (1 / cr.LED_GAMMA) for d in drive]  # as bright as it looks
+    assert looks == sorted(looks, reverse=True)                 # only ever dims
+    assert max(a - b for a, b in zip(looks, looks[1:])) < 0.3   # no sudden drop between frames
+
+
+def test_a_held_key_stays_lit_until_released_then_fades():
+    presses = [("Key: C5", 10.0)]
+    held = ripples_at_keys(presses, 10.0 + 5, held={"Key: C5"})
+    assert lum(held["Key: C5"]) > 400                           # long after the ring is gone
+    assert {c for n, c in held.items() if n not in ("Logo", "Key: C5")} == {cr.RIPPLE_REST}
+    released = [("Key: C5", 15.0)]
+    just = ripples_at_keys(presses, 15.0, releases=released)
+    later = ripples_at_keys(presses, 15.0 + cr.RIPPLE_LIFE, releases=released)
+    assert lum(just["Key: C5"]) > 400
+    assert later["Key: C5"] == cr.RIPPLE_REST
+
+
+def test_key_listener_tracks_held_keys_from_raw_events():
+    keys = cr.KeyPresses()
+    keys.record("Key: J", True, 1.0)
+    keys.record("Key: J", True, 1.5)                            # a second down (no up between) is no new ring
+    assert keys.held() == {"Key: J"}
+    assert keys.recent(2.0) == [("Key: J", 1.0)]
+    keys.record("Key: J", False, 2.0)
+    assert keys.held() == set()
+    assert keys.releases(2.5) == [("Key: J", 2.0)]
+    keys.enable(False)
+    assert (keys.held(), keys.recent(2.5), keys.releases(2.5)) == (set(), [], [])
+
+
+def test_ripples_ignore_keys_without_a_position():
+    frame = cr.render_ripples(RIPPLE_NAMES, RIPPLE_POS, [("Key: Nope", 1.0)], {"Key: Nope"}, [], 1.0)
+    assert set(frame[1:]) == {cr.RIPPLE_REST}
+
+
+def test_rgb_mode_defaults_to_info(tmp_path):
+    assert cr.read_rgb_mode(str(tmp_path / "missing")) == "info"
+    (tmp_path / "mode").write_text("disco\n")
+    assert cr.read_rgb_mode(str(tmp_path / "mode")) == "info"
+
+
+def test_mode_command_toggles_and_sets(tmp_path, capsys):
+    path = str(tmp_path / "sub" / "mode")
+    assert cr.mode_command([], path) == 0
+    assert cr.read_rgb_mode(path) == "ripples"
+    assert cr.mode_command(["toggle"], path) == 0
+    assert cr.read_rgb_mode(path) == "info"
+    assert cr.mode_command(["ripples"], path) == 0
+    assert cr.mode_command(["ripples"], path) == 0
+    assert cr.read_rgb_mode(path) == "ripples"
+    assert capsys.readouterr().out.split() == ["ripples", "info", "ripples", "ripples"]
+    assert cr.mode_command(["disco"], path) == 2
+    assert cr.read_rgb_mode(path) == "ripples"
+
+
+def test_server_has_news_only_when_something_is_waiting():
+    import socket
+    header = b"ORGB\0\0\0\0d\0\0\0\0\0\0\0"     # DEVICE_LIST_UPDATED (100)
+    a, b = socket.socketpair()
+    with a, b:
+        assert not cr.server_has_news(a)
+        b.sendall(header)
+        assert cr.server_has_news(a)
+        assert a.recv(16) == header
+        b.close()
+        assert cr.server_has_news(a)                                  # closed counts too
