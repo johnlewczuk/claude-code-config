@@ -58,6 +58,8 @@ export function Review({ owner, repo, number }: Props) {
   trailNow.current = trail
   // What to do once the diff is showing again after Back.
   const afterBack = useRef<{ scroll?: number; then?: () => void } | null>(null)
+  // The head the page shows; a reload that brings a new one drops what was shown of the old.
+  const shownHead = useRef<string | null>(null)
 
   const toast = useCallback((msg: string) => {
     const id = Date.now() + Math.random()
@@ -76,6 +78,12 @@ export function Review({ owner, repo, number }: Props) {
         else if (event === 'failed') failed = d.error
         else if (event === 'ready') {
           const p = d as LoadPayload
+          if (shownHead.current && shownHead.current !== p.head) {
+            // Places in the peek and the whole-file view are line numbers of the old head.
+            closePeek()
+            if (trailNow.current.length) history.go(-trailNow.current.length)
+          }
+          shownHead.current = p.head
           setData(p)
           setThreads(p.pr.threads ?? [])
           setGhFiles(p.pr.files ?? [])
@@ -91,7 +99,7 @@ export function Review({ owner, repo, number }: Props) {
       failed = String(e instanceof Error ? e.message : e)
     }
     if (failed) setLoadError(failed)
-  }, [api])
+  }, [api, closePeek])
 
   useEffect(() => {
     load()

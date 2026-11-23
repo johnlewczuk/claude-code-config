@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks'
-import { getJSON } from '../api'
 import { useReview } from '../ctx'
 import { languageFor } from '../highlight'
+import { fetchFile } from '../lines'
 import type { DLine } from '../rows'
 import { Chip, Code, codeClick, noSelectWithCtrl } from './Code'
 import { Peek } from './Peek'
@@ -21,40 +21,26 @@ interface Props {
   onScroll?(top: number): void
 }
 
-// Whole files already fetched, so stepping back to one is instant.
-const files = new Map<string, Promise<string[]>>()
-
-function fetchFile(api: string, side: 'new' | 'old', path: string): Promise<string[]> {
-  const key = `${api}|${side}|${path}`
-  let p = files.get(key)
-  if (!p) {
-    if (files.size >= 40) files.delete(files.keys().next().value!)
-    p = getJSON<{ lines: string[] }>(`${api}/lines?side=${side}&path=${encodeURIComponent(path)}`).then((r) => r.lines ?? [])
-    p.catch(() => files.delete(key))
-    files.set(key, p)
-  }
-  return p
-}
-
 /** A whole file with a gutter and syntax colours, the given line marked and centred. */
 export function CodeView({ path, side, line, lang, onCtrlClick, added, peekable, scroll, onScroll }: Props) {
   const rv = useReview()
   const [lines, setLines] = useState<string[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const box = useRef<HTMLDivElement>(null)
+  const rev = side === 'old' ? rv.data.base : rv.data.head
 
   useEffect(() => {
     let live = true
     setLines(null)
     setError(null)
-    fetchFile(rv.api, side, path).then(
+    fetchFile(rv.api, side, rev, path).then(
       (l) => live && setLines(l),
       (e) => live && setError(e instanceof Error ? e.message : String(e)),
     )
     return () => {
       live = false
     }
-  }, [rv.api, side, path])
+  }, [rv.api, side, rev, path])
 
   useLayoutEffect(() => {
     const el = box.current
