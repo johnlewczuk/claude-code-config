@@ -9,8 +9,10 @@ export interface ClickTarget {
   col: number
 }
 
-// Colour classes whose text is never a name worth looking up.
-const NOT_NAMES = new Set(['comment', 'string', 'keyword', 'built_in', 'literal', 'number', 'meta'])
+// Colour classes whose text is never a name worth looking up. Not
+// `built_in`: highlight.js uses it for every function call in C++, so
+// blocking it would stop a click on any call there.
+const NOT_NAMES = new Set(['comment', 'string', 'keyword', 'literal', 'number', 'meta'])
 
 const ENTITIES: Record<string, string> = {
   amp: '&',
