@@ -27,26 +27,95 @@ type Place struct {
 	Changed bool   `json:"changed"`
 }
 
-// defWords starts a definition in common languages.
-var defWords = regexp.MustCompile(`^\s*(func|def|fn|function|class|struct|interface|type|enum|impl|pub|static|async|export|public|private|protected|void|const|let|var)\b`)
+// A definition is read from the start of the line: modifiers, then at most
+// one definition word (with what may follow it), then more modifiers, then
+// the name being defined.
+var (
+	modifiers = regexp.MustCompile(`^(?:(?:pub(?:\([^)]*\))?|static|async|export|default|public|private|protected|internal|abstract|final|override|virtual|inline|extern|unsafe|readonly|declare|constexpr|mut)\s+)+`)
+	defWord   = regexp.MustCompile(`^(?:(func|def|fn|fun|class|struct|interface|protocol|type|enum|impl|trait|union|namespace|module|let|var|val|const)(?:\s+|$)|function\b\s*\*?\s*|#\s*define\s+)`)
+	// Go's method receiver, after func.
+	receiver = regexp.MustCompile(`^\([^)]*\)\s*`)
+	// Type parameters, as in impl<T> Foo.
+	typeParams = regexp.MustCompile(`^<[^>]*>\s*`)
+	// The first name, maybe qualified (Type::Name or a.b.Name).
+	firstName = regexp.MustCompile(`^(?:\w+(?:::|\.))*(\w+)`)
+	// C and C++ style: a type (a return or variable type), then the name
+	// declared, maybe qualified, then what can follow a declared name. The
+	// type can't hold "(", "=", "." or a lone ":", so it can't reach past the
+	// first call or assignment on the line.
+	declarator = regexp.MustCompile(`^((?:\w|::|[<>,*&\s\[\]])*?[\w>\]][\s*&]+)?(?:\w+::)*~?(\w+)\s*(\(|=[^=]|;|\{|\[|:[^:])`)
+	words      = regexp.MustCompile(`\w+`)
+)
 
-func wordRe(name string) *regexp.Regexp {
-	return regexp.MustCompile(`(^|[^A-Za-z0-9_])` + regexp.QuoteMeta(name) + `($|[^A-Za-z0-9_])`)
+// cTypeWords are definition words that can also begin a C or C++ type, as
+// in "const std::string& name()" or "struct Foo make()".
+var cTypeWords = map[string]bool{"const": true, "struct": true, "enum": true, "union": true}
+
+// statementWords begin statements, not declarations: "return helper()" uses
+// helper.
+var statementWords = map[string]bool{
+	"return": true, "if": true, "elif": true, "else": true, "while": true, "for": true, "in": true, "of": true,
+	"do": true, "switch": true, "case": true, "new": true, "delete": true, "throw": true, "raise": true,
+	"await": true, "yield": true, "go": true, "defer": true, "not": true, "and": true, "or": true, "is": true,
+	"assert": true, "with": true, "goto": true, "sizeof": true, "typeof": true, "instanceof": true,
+	"co_return": true, "co_await": true, "co_yield": true, "del": true, "lambda": true, "break": true,
+	"continue": true, "import": true, "from": true, "package": true, "using": true, "emit": true, "as": true,
+	"print": true, "echo": true,
 }
 
-// IsDefinition reports whether line defines name rather than uses it.
+// IsDefinition reports whether line defines name rather than uses it. name
+// has to be the thing defined, not just appear on the line: "func (s
+// *Server) Run()" defines Run, not Server, and "const user = getUser(id)"
+// defines user, not getUser.
 func IsDefinition(line, name string) bool {
-	t := strings.TrimSpace(line)
-	if loc := defWords.FindStringIndex(line); loc != nil && wordRe(name).MatchString(line[loc[1]:]) {
+	rest := strings.TrimLeft(line, " \t")
+	indented := len(rest) < len(line)
+	skipped := false // a modifier or a definition word came first
+	skip := func(re *regexp.Regexp) []string {
+		m := re.FindStringSubmatch(rest)
+		if m != nil {
+			rest = rest[len(m[0]):]
+			skipped = true
+		}
+		return m
+	}
+	skip(modifiers)
+	if w := skip(defWord); w != nil {
+		skip(receiver)
+		skip(typeParams)
+		skip(modifiers)
+		// func Run, class Foo, let x, #define MAX: the first name.
+		if m := firstName.FindStringSubmatch(rest); m != nil && m[1] == name {
+			return true
+		}
+		if !cTypeWords[w[1]] {
+			return false
+		}
+	}
+	// A type, then the name: int helper(), void Node::Run(), public
+	// getUser(), static const int kMax = 5.
+	m := declarator.FindStringSubmatch(rest)
+	if m == nil || m[2] != name {
+		return false
+	}
+	for _, w := range words.FindAllString(m[1], -1) {
+		if statementWords[w] {
+			return false
+		}
+	}
+	switch {
+	case skipped:
+		return true
+	case m[3] != "(":
+		// "x, y = f()" and "err := f()" assign; only a modifier or a
+		// definition word makes these a declaration.
+		return false
+	case m[1] != "":
 		return true
 	}
-	if strings.Contains(line, "::"+name+"(") {
-		return true
-	}
-	// C and C++: the name and "(" at the start of an unindented line that
-	// doesn't end in ";".
-	return strings.Contains(line, name+"(") && !strings.HasSuffix(t, ";") &&
-		!strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t")
+	// No type: a constructor (Foo::Foo(…)) or a function whose return type
+	// is on the line above, at the start of a line not ending in ";".
+	return !indented && !strings.HasSuffix(strings.TrimSpace(line), ";")
 }
 
 // commentPrefixes gives the ways a whole-line comment can start, by file
@@ -54,7 +123,8 @@ func IsDefinition(line, name string) bool {
 func commentPrefixes(file string) []string {
 	switch strings.ToLower(path.Ext(file)) {
 	case ".go", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".java", ".js", ".jsx", ".ts", ".tsx", ".rs", ".cs", ".swift", ".kt", ".proto", ".css", ".scss", ".php":
-		return []string{"//", "/*", "*"}
+		// "* " continues a /* */ block; "*out = x" is code.
+		return []string{"//", "/*", "*/", "* ", "*\t"}
 	case ".py", ".sh", ".bash", ".zsh", ".yaml", ".yml", ".cmake", ".rb", ".toml", ".mk":
 		return []string{"#"}
 	case ".sql", ".lua":
@@ -67,7 +137,8 @@ func commentPrefixes(file string) []string {
 
 // IsCommentOnly reports whether the whole line is a comment.
 func IsCommentOnly(file, line string) bool {
-	t := strings.TrimSpace(line)
+	// The space added lets a bare "*" line match "* ".
+	t := strings.TrimSpace(line) + " "
 	for _, p := range commentPrefixes(file) {
 		if strings.HasPrefix(t, p) {
 			return true
