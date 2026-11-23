@@ -99,8 +99,12 @@ export function Review({ owner, repo, number }: Props) {
 
   // Back, forward and a reload with a place in the address: the history entry says which trail is on show.
   useEffect(() => {
+    const saved: Spot[] | undefined = history.state?.trail
     const first = hashToSpot(location.hash)
-    if (first) {
+    if (saved?.length) {
+      // The page was reloaded on a whole file: history already holds the trail, with the diff beneath.
+      setTrail(saved)
+    } else if (first) {
       // Put the diff underneath, so Back leaves the place for the diff first.
       history.replaceState({ trail: [] }, '', location.pathname + location.search)
       history.pushState({ trail: [first] }, '', location.pathname + location.search + spotToHash(first))
@@ -122,8 +126,9 @@ export function Review({ owner, repo, number }: Props) {
     const a = afterBack.current
     if (spot || !a) return
     afterBack.current = null
+    const scroller = scrollerOf(mid.current)
     if (a.then) a.then()
-    else if (a.scroll !== undefined && mid.current) mid.current.scrollTop = a.scroll
+    else if (a.scroll !== undefined && scroller) scroller.scrollTop = a.scroll
   }, [spot])
 
   // Poll for the reading order while Claude writes it.
@@ -277,7 +282,7 @@ export function Review({ owner, repo, number }: Props) {
     ...peekState,
     openFully(s) {
       // Remember where the diff was scrolled to, so Back lands there.
-      if (!trailNow.current.length) history.replaceState({ trail: [], scroll: mid.current?.scrollTop }, '')
+      if (!trailNow.current.length) history.replaceState({ trail: [], scroll: scrollerOf(mid.current)?.scrollTop }, '')
       const next = [...trailNow.current, s]
       history.pushState({ trail: next }, '', location.pathname + location.search + spotToHash(s))
       closePeek()
@@ -342,12 +347,14 @@ export function Review({ owner, repo, number }: Props) {
     })
 
   const jumpTo = (path: string, step?: Step, stepIndex?: number) => {
-    if (spot) {
-      // Go back to the diff first, then jump once it is showing.
-      afterBack.current = { then: () => jumpTo(path, step, stepIndex) }
-      history.go(-trail.length)
-      return
-    }
+    if (!spot) return showInDiff(path, step, stepIndex)
+    // Go back to the diff first, then jump once it is showing.
+    afterBack.current = { then: () => showInDiff(path, step, stepIndex) }
+    history.go(-trail.length)
+  }
+
+  /** Scrolls the diff to a file, or to a reading-order step in it, and flashes it. */
+  const showInDiff = (path: string, step?: Step, stepIndex?: number) => {
     if (stepIndex !== undefined) setCurrentStep(stepIndex)
     const fi = files.findIndex((f) => f.path === path || f.oldPath === path)
     if (fi < 0) return
@@ -455,6 +462,15 @@ export function Review({ owner, repo, number }: Props) {
       </div>
     </ReviewCtx.Provider>
   )
+}
+
+/** The element that scrolls the middle pane: the pane itself, or the whole body in the narrow layout. */
+function scrollerOf(el: HTMLElement | null): HTMLElement | null {
+  for (let e = el; e; e = e.parentElement) {
+    const overflow = getComputedStyle(e).overflowY
+    if (overflow === 'auto' || overflow === 'scroll') return e
+  }
+  return document.scrollingElement as HTMLElement | null
 }
 
 /** Files in reading order: steps first, then groups, then the rest in path order. */
