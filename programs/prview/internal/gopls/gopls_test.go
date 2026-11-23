@@ -25,8 +25,8 @@ func write(t *testing.T, root, rel, content string) {
 
 func TestWriteGoWork(t *testing.T) {
 	root := t.TempDir()
-	write(t, root, "services/a/go.mod", "module a\n")
-	write(t, root, "services/b/go.mod", "module b\n")
+	write(t, root, "services/a/go.mod", "module a\n\ngo 1.22\n")
+	write(t, root, "services/b/go.mod", "module b\n\ngo 1.26.2\n")
 	write(t, root, "vendor/x/go.mod", "module x\n")
 	work := filepath.Join(t.TempDir(), "go.work")
 	use, err := WriteGoWork(root, work)
@@ -39,6 +39,10 @@ func TestWriteGoWork(t *testing.T) {
 		if !strings.Contains(got, want+"\n") {
 			t.Errorf("missing %s in\n%s", want, got)
 		}
+	}
+	// The workspace asks for the newest Go any module needs.
+	if !strings.HasPrefix(got, "go 1.26.2\n") {
+		t.Errorf("go line:\n%s", got)
 	}
 	if strings.Contains(got, "vendor") {
 		t.Errorf("vendor listed:\n%s", got)

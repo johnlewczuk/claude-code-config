@@ -1,6 +1,7 @@
 package gopls
 
 import (
+	"go/version"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,6 +24,7 @@ func WriteGoWork(checkout, workFile string) (useEnv bool, err error) {
 		return false, nil
 	}
 	var mods []string
+	goVer := "" // the newest go line of the modules: the workspace needs at least that
 	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -36,6 +38,9 @@ func WriteGoWork(checkout, workFile string) (useEnv bool, err error) {
 		}
 		if d.Name() == "go.mod" {
 			mods = append(mods, filepath.Dir(p))
+			if v := goLine(p); version.Compare("go"+v, "go"+goVer) > 0 {
+				goVer = v
+			}
 		}
 		return nil
 	})
@@ -44,7 +49,10 @@ func WriteGoWork(checkout, workFile string) (useEnv bool, err error) {
 	}
 	sort.Strings(mods)
 	var b strings.Builder
-	b.WriteString("go 1.26\n\nuse (\n")
+	if goVer != "" {
+		b.WriteString("go " + goVer + "\n\n")
+	}
+	b.WriteString("use (\n")
 	for _, m := range mods {
 		if strings.ContainsAny(m, " \t\"'`") {
 			m = strconv.Quote(m)
@@ -56,4 +64,18 @@ func WriteGoWork(checkout, workFile string) (useEnv bool, err error) {
 		return false, err
 	}
 	return true, os.WriteFile(workFile, []byte(b.String()), 0o644)
+}
+
+// goLine returns the Go version a go.mod file asks for, or "" if none.
+func goLine(goMod string) string {
+	b, err := os.ReadFile(goMod)
+	if err != nil {
+		return ""
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if f := strings.Fields(l); len(f) == 2 && f[0] == "go" && version.IsValid("go"+f[1]) {
+			return f[1]
+		}
+	}
+	return ""
 }
