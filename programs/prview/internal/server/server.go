@@ -54,13 +54,11 @@ type Server struct {
 
 	stop func() // shuts the server down; set by the caller that runs it
 
-	gopls    *gopls.Pool // nil when gopls isn't installed
-	goplsMu  sync.Mutex
-	goplsHot map[string]bool // session keys that have already answered once
+	gopls *gopls.Pool // nil when gopls isn't installed
 
-	// checkout puts the loaded head in a folder and returns it. It is
-	// s.worktree except in tests.
-	checkout func(*http.Request, *prState) (string, error)
+	// checkout puts the loaded head in a folder and returns the folder and
+	// the head. It is s.worktree except in tests.
+	checkout func(*http.Request, *prState) (dir, head string, err error)
 
 	mu    sync.Mutex
 	prs   map[string]*prState
@@ -73,10 +71,10 @@ func (s *Server) OnStop(f func()) { s.stop = f }
 // New makes a server. claudeRunner may be nil.
 func New(gh GitHub, claudeRunner *claude.Runner, cacheDir, key string) *Server {
 	s := &Server{gh: gh, claude: claudeRunner, cache: cacheDir, key: key,
-		prs: map[string]*prState{}, repos: map[string]*gitrepo.Repo{}, goplsHot: map[string]bool{}}
+		prs: map[string]*prState{}, repos: map[string]*gitrepo.Repo{}}
 	s.checkout = s.worktree
 	if bin, err := exec.LookPath("gopls"); err == nil {
-		s.gopls = gopls.NewPool(s.startGopls(bin), 10*time.Minute, 3)
+		s.gopls = gopls.NewPool(s.startGopls(bin), 10*time.Minute, 2)
 	} else {
 		log.Printf("exact Go lookups off: %v", err)
 	}

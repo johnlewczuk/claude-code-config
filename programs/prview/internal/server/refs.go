@@ -155,12 +155,11 @@ func (s *Server) startGopls(bin string) gopls.StartFunc {
 // the clicked place, in the checkout of the loaded head.
 func (s *Server) refsByGopls(ctx context.Context, r *http.Request, st *prState, q refsQuery, progress func(string)) (*refsPayload, error) {
 	progress("Getting the code ready…")
-	dir, err := s.checkout(r, st)
+	dir, head, err := s.checkout(r, st)
 	if err != nil {
 		return nil, err
 	}
 	st.mu.Lock()
-	head := st.head
 	changed := map[string]bool{}
 	for _, f := range st.files {
 		changed[f.Path] = true
@@ -168,42 +167,27 @@ func (s *Server) refsByGopls(ctx context.Context, r *http.Request, st *prState, 
 	st.mu.Unlock()
 	key := fmt.Sprintf("%s/%s/%d@%s", st.owner, st.name, st.number, head)
 
-	s.goplsMu.Lock()
-	wait := goplsFirstWait
-	if s.goplsHot[key] {
-		wait = goplsLaterWait
-	}
-	s.goplsMu.Unlock()
-	if wait == goplsFirstWait {
+	wait := goplsLaterWait
+	if !s.gopls.Answered(key) {
+		wait = goplsFirstWait
 		progress("Loading the Go code (first time can take a minute)…")
 	}
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	client, err := s.gopls.Get(ctx, key, dir)
+	if err != nil {
+		return nil, err
+	}
+	defs, err := client.Definition(ctx, q.Path, q.Line, q.Col)
+	var uses []gopls.Loc
 	if err == nil {
-		var defs, uses []gopls.Loc
-		if defs, err = client.Definition(ctx, q.Path, q.Line, q.Col); err == nil {
-			uses, err = client.References(ctx, q.Path, q.Line, q.Col)
-		}
-		if err == nil {
-			s.setGoplsHot(key, true)
-			return goplsPayload(dir, q, defs, uses, changed), nil
-		}
+		uses, err = client.References(ctx, q.Path, q.Line, q.Col)
 	}
-	// Whatever went wrong, the next try may be a fresh session, which
-	// needs the long wait again.
-	s.setGoplsHot(key, false)
-	return nil, err
-}
-
-func (s *Server) setGoplsHot(key string, hot bool) {
-	s.goplsMu.Lock()
-	defer s.goplsMu.Unlock()
-	if hot {
-		s.goplsHot[key] = true
-	} else {
-		delete(s.goplsHot, key)
+	s.gopls.Finished(key, client, err)
+	if err != nil {
+		return nil, err
 	}
+	return goplsPayload(dir, q, defs, uses, changed), nil
 }
 
 // goplsPayload turns gopls's places into the answer, reading each line's

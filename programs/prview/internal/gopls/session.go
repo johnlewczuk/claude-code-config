@@ -43,6 +43,12 @@ type Session struct {
 	closeOnce sync.Once
 }
 
+// ReplyError is gopls answering a request with an error, such as "no
+// identifier found": the session itself is fine.
+type ReplyError struct{ Message string }
+
+func (e *ReplyError) Error() string { return "gopls: " + e.Message }
+
 // reply is a response from gopls: a result or an error.
 type reply struct {
 	result json.RawMessage
@@ -319,7 +325,7 @@ func (s *Session) deliver(m message) {
 		return
 	}
 	if m.Error != nil {
-		ch <- reply{err: fmt.Errorf("gopls: %s", m.Error.Message)}
+		ch <- reply{err: &ReplyError{Message: m.Error.Message}}
 		return
 	}
 	ch <- reply{result: m.Result}
@@ -336,8 +342,5 @@ func (s *Session) answerRequest(m message) {
 		json.Unmarshal(m.Params, &p)
 		result = json.RawMessage("[" + strings.TrimSuffix(strings.Repeat("null,", len(p.Items)), ",") + "]")
 	}
-	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":%s}`, m.ID, result)
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	fmt.Fprintf(s.in, "Content-Length: %d\r\n\r\n%s", len(body), body)
+	s.send(message{ID: m.ID, Result: result})
 }

@@ -65,14 +65,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request, st *prState)
 
 // worktree checks out the loaded head into this PR's folder for Claude and
 // writes the PR's description and diff next to it, so Claude can read them.
-func (s *Server) worktree(r *http.Request, st *prState) (string, error) {
+// It returns the folder and the head it checked out.
+func (s *Server) worktree(r *http.Request, st *prState) (dir, head string, err error) {
 	pr, head, err := st.loaded()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	dir := filepath.Join(s.cache, "worktrees", st.owner, st.name, fmt.Sprint(st.number))
+	dir = filepath.Join(s.cache, "worktrees", st.owner, st.name, fmt.Sprint(st.number))
 	if err := st.repo.Worktree(r.Context(), dir, head); err != nil {
-		return "", err
+		return "", "", err
 	}
 	st.mu.Lock()
 	files, base := st.files, st.base
@@ -84,7 +85,7 @@ func (s *Server) worktree(r *http.Request, st *prState) (string, error) {
 	os.WriteFile(filepath.Join(info, "description.md"), []byte("# "+pr.Title+"\n\n"+pr.Body+"\n"), 0o644)
 	os.WriteFile(filepath.Join(info, "pr.diff"), []byte(plainDiff(files)), 0o644)
 	os.WriteFile(filepath.Join(info, "commits.txt"), []byte(commitList(pr, base)), 0o644)
-	return dir, nil
+	return dir, head, nil
 }
 
 func plainDiff(files []diff.File) string {
@@ -205,7 +206,7 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request, st *prState) 
 
 	send := sse(w)
 	send("tool", claude.Event{Kind: "tool", Text: "Getting the code ready"})
-	dir, err := s.worktree(r, st)
+	dir, _, err := s.worktree(r, st)
 	if err != nil {
 		send("failed", map[string]string{"error": err.Error()})
 		return
@@ -263,7 +264,7 @@ func (s *Server) handleDraft(w http.ResponseWriter, r *http.Request, st *prState
 		return
 	}
 	send := sse(w)
-	dir, err := s.worktree(r, st)
+	dir, _, err := s.worktree(r, st)
 	if err != nil {
 		send("failed", map[string]string{"error": err.Error()})
 		return

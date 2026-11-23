@@ -2,6 +2,7 @@ package gopls
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -153,6 +154,92 @@ func TestPoolIdle(t *testing.T) {
 	p.Get(context.Background(), "k1", "/d")
 	time.Sleep(150 * time.Millisecond)
 	waitClosed(t, fs.clients[0])
+}
+
+func TestPoolStopsBrokenSessions(t *testing.T) {
+	fs := &fakeStarts{}
+	p := NewPool(fs.start, time.Minute, 2)
+	defer p.Close()
+	ctx := context.Background()
+	c, _ := p.Get(ctx, "k", "/d")
+	if p.Answered("k") {
+		t.Fatal("answered before any lookup")
+	}
+	p.Finished("k", c, nil)
+	if !p.Answered("k") {
+		t.Fatal("not answered after a lookup")
+	}
+	// gopls saying it can't answer, or the caller giving up, leaves the session be.
+	p.Finished("k", c, &ReplyError{Message: "no identifier found"})
+	p.Finished("k", c, context.Canceled)
+	if again, _ := p.Get(ctx, "k", "/d"); again != c || !p.Answered("k") {
+		t.Fatal("a fine session was replaced")
+	}
+	// gopls gone quiet: the next Get starts afresh, and waits as for a first answer.
+	p.Finished("k", c, context.DeadlineExceeded)
+	waitClosed(t, fs.clients[0])
+	if p.Answered("k") {
+		t.Error("a stopped session still counts as answering")
+	}
+	if fresh, _ := p.Get(ctx, "k", "/d"); fresh == c || fs.count() != 2 {
+		t.Errorf("starts: %d", fs.count())
+	}
+	// A report about a session that was already replaced changes nothing.
+	p.Finished("k", c, errors.New("gopls stopped"))
+	if fs.clients[1].isClosed() {
+		t.Error("closed the new session for the old one's failure")
+	}
+}
+
+func TestPoolForgetsAnsweredWhenIdle(t *testing.T) {
+	fs := &fakeStarts{}
+	p := NewPool(fs.start, 50*time.Millisecond, 2)
+	defer p.Close()
+	c, _ := p.Get(context.Background(), "k", "/d")
+	p.Finished("k", c, nil)
+	waitClosed(t, fs.clients[0])
+	if p.Answered("k") {
+		t.Error("a session stopped for being idle still counts as answering")
+	}
+}
+
+// A session stopped while it was starting (here, for a new head) is closed
+// once its start finishes, and whoever waited for it gets an error.
+func TestPoolStopsSessionStillStarting(t *testing.T) {
+	release := make(chan struct{})
+	slow := &fakeClient{}
+	fs := &fakeStarts{}
+	start := func(ctx context.Context, dir string) (Client, error) {
+		if dir == "/slow" {
+			<-release
+			return slow, nil
+		}
+		return fs.start(ctx, dir)
+	}
+	p := NewPool(start, time.Minute, 2)
+	defer p.Close()
+	got := make(chan error)
+	go func() {
+		_, err := p.Get(context.Background(), "o/r/1@h1", "/slow")
+		got <- err
+	}()
+	for {
+		p.mu.Lock()
+		n := len(p.entries)
+		p.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := p.Get(context.Background(), "o/r/1@h2", "/d"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-got; !errors.Is(err, errStopped) {
+		t.Errorf("err %v", err)
+	}
+	waitClosed(t, slow)
 }
 
 func TestSessionAcrossModules(t *testing.T) {

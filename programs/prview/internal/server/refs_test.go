@@ -72,7 +72,7 @@ func newRefsFixture(t *testing.T, base, head map[string]string) *refsFixture {
 	st.base, st.head = b, hd
 	st.files = []diff.File{{Path: "b.go", OldPath: "b.go"}}
 	s.gopls = nil // tests that want gopls set a fake
-	s.checkout = func(*http.Request, *prState) (string, error) { return dir, nil }
+	s.checkout = func(*http.Request, *prState) (string, string, error) { return dir, hd, nil }
 	return &refsFixture{s: s, h: h, dir: dir, base: b, head: hd}
 }
 
@@ -206,6 +206,7 @@ type fakeGopls struct {
 	defs, uses []gopls.Loc
 	err        error
 	calls      int
+	starts     int
 }
 
 func (g *fakeGopls) Definition(ctx context.Context, path string, line, col int) ([]gopls.Loc, error) {
@@ -219,7 +220,10 @@ func (g *fakeGopls) References(ctx context.Context, path string, line, col int) 
 func (g *fakeGopls) Close() {}
 
 func (f *refsFixture) useGopls(g *fakeGopls) {
-	f.s.gopls = gopls.NewPool(func(context.Context, string) (gopls.Client, error) { return g, nil }, time.Minute, 2)
+	f.s.gopls = gopls.NewPool(func(context.Context, string) (gopls.Client, error) {
+		g.starts++
+		return g, nil
+	}, time.Minute, 2)
 }
 
 func TestRefsUsesGoplsForGo(t *testing.T) {
@@ -265,5 +269,38 @@ func TestRefsNameForOtherLanguages(t *testing.T) {
 	}
 	if p.Source != "name" || g.calls != 0 {
 		t.Errorf("source %q, gopls calls %d", p.Source, g.calls)
+	}
+}
+
+// A gopls that stopped is replaced on the next lookup, which waits as long
+// as a first one and says so.
+func TestRefsRestartsGoplsThatStopped(t *testing.T) {
+	f := newRefsFixture(t, map[string]string{"x.txt": "x\n"}, runFiles)
+	g := &fakeGopls{defs: []gopls.Loc{{Path: "a.go", Line: 1, Col: 6}}}
+	f.useGopls(g)
+	query := "path=b.go&side=new&line=1&col=2&name=Run"
+	if p, e := f.refs(t, query); p == nil || p.Source != "gopls" {
+		t.Fatal(p, e)
+	}
+	key := "o/r/1@" + f.head
+	if !f.s.gopls.Answered(key) {
+		t.Fatal("an answer didn't count")
+	}
+
+	g.err = errors.New("gopls stopped")
+	if p, e := f.refs(t, query); p == nil || p.Source != "name" {
+		t.Fatal(p, e)
+	}
+	if f.s.gopls.Answered(key) {
+		t.Fatal("the stopped session still counts as answering")
+	}
+
+	g.err = nil
+	w := do(f.h, "GET", "/api/pr/o/r/1/refs?"+query, "", true, "")
+	if !strings.Contains(w.Body.String(), "Loading the Go code") || !strings.Contains(w.Body.String(), `"source":"gopls"`) {
+		t.Fatalf("got %s", w.Body)
+	}
+	if g.starts != 2 {
+		t.Errorf("starts %d, want 2", g.starts)
 	}
 }
