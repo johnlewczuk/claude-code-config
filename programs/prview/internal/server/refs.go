@@ -21,6 +21,10 @@ import (
 // maxPlaces is how many places /refs sends; the rest are only counted.
 const maxPlaces = 300
 
+// grepLimit is how many matches of a name are read before ranking, so a
+// definition far down the path order still gets ranked above the uses.
+const grepLimit = 3000
+
 // refsQuery is what /refs is asked: the name at path:line:col on one side
 // of the diff, and the type it was used on when the page knows it.
 type refsQuery struct {
@@ -103,11 +107,16 @@ func (s *Server) refsByName(ctx context.Context, st *prState, rev string, q refs
 		st.treeReady[rev] = true
 		st.mu.Unlock()
 	}
-	ms, more, err := st.repo.Grep(ctx, rev, q.Name, maxPlaces)
+	ms, more, err := st.repo.Grep(ctx, rev, q.Name, grepLimit)
 	if err != nil {
 		return nil, err
 	}
-	return &refsPayload{Name: q.Name, Source: "name", Places: code.Rank(q.Name, q.Hint, q.Path, ms, changed), More: more}, nil
+	places := code.Rank(q.Name, q.Hint, q.Path, ms, changed)
+	if len(places) > maxPlaces {
+		more += len(places) - maxPlaces
+		places = places[:maxPlaces]
+	}
+	return &refsPayload{Name: q.Name, Source: "name", Places: places, More: more}, nil
 }
 
 // Time gopls gets for an answer: the first one waits for it to read all the
