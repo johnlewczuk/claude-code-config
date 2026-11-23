@@ -1,6 +1,6 @@
 # prview
 
-A local web page for reviewing GitHub pull requests, with three things
+A local web page for reviewing GitHub pull requests, with four things
 github.com doesn't give you:
 
 - **Which commit changed each line.** Every added or removed line has a tag
@@ -12,6 +12,14 @@ github.com doesn't give you:
 - **Claude beside the diff.** Select lines and ask about them, or have Claude
   draft a review comment you then edit. Claude can read the whole checkout
   but can't change files, run commands or post anything.
+- **Find where a name is defined and used.** Ctrl+click (Cmd+click on a Mac)
+  a name in the code. A window opens under the line with the definition on
+  the left and a list of uses on the right. Ctrl+click a name inside the
+  window to follow it further, and go back with the arrow in its header.
+  Double-click a place to open its whole file; the Back button (or your
+  browser's) returns to the diff where you were. Go answers are exact when
+  `gopls` is installed; other languages are found by name, so a result may
+  include other functions with the same name.
 
 You can also do a normal review: comment on lines or ranges, suggest changes,
 reply, resolve, mark files Viewed (shared with github.com), and submit as
