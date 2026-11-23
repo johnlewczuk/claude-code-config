@@ -18,11 +18,12 @@ export function Peek() {
   const levels = rv.peek?.levels ?? []
   const level = levels[levels.length - 1]
 
-  // Take the keys when it opens, and bring it into view without pushing the clicked line off screen.
+  // Take the keys when it opens (or a new name is looked up from the diff), and bring it into
+  // view without pushing the clicked line off screen.
   useEffect(() => {
     box.current?.focus({ preventScroll: true })
     box.current?.scrollIntoView({ block: 'nearest' })
-  }, [])
+  }, [levels[0]?.id])
 
   if (!level) return null
   const places = level.result?.places ?? []
@@ -58,7 +59,15 @@ export function Peek() {
     <div class="peek" ref={box} tabIndex={-1} onKeyDown={onKeyDown}>
       <div class="peek-head">
         {levels.length > 1 && (
-          <button class="btn" onClick={rv.peekBack} title="Back to the previous name (Alt+Left)">
+          <button
+            class="btn"
+            onClick={() => {
+              rv.peekBack()
+              // Keep the keys on the window, not on a button that may be gone.
+              box.current?.focus({ preventScroll: true })
+            }}
+            title="Back to the previous name (Alt+Left)"
+          >
             ←
           </button>
         )}
@@ -99,6 +108,9 @@ interface BodyProps {
 
 function PeekBody({ level, chosen, groups, showComments, toggleComments, openFully }: BodyProps) {
   const rv = useReview()
+  const chosenEntry = useRef<HTMLDivElement>(null)
+  // Up and Down can walk past the list's edge: keep the chosen entry in sight.
+  useEffect(() => chosenEntry.current?.scrollIntoView({ block: 'nearest' }), [level.id, level.chosen])
   if (level.status === 'loading')
     return (
       <div class="peek-note">
@@ -120,6 +132,7 @@ function PeekBody({ level, chosen, groups, showComments, toggleComments, openFul
   const entry = (p: Place) => (
     <div
       key={`${p.path}:${p.line}:${p.col}`}
+      ref={p === chosen ? chosenEntry : undefined}
       class={`peek-item ${p === chosen ? 'chosen' : ''}`}
       onClick={() => rv.choosePlace(places.indexOf(p))}
       onDblClick={openFully}
@@ -161,8 +174,8 @@ function PeekBody({ level, chosen, groups, showComments, toggleComments, openFul
               line={chosen.line}
               lang={null}
               onCtrlClick={rv.drill}
-              scroll={level.scroll}
-              onScroll={(top) => rv.saveScroll(level.id, top)}
+              scroll={rv.scrollOf(level)}
+              onScroll={(top) => rv.saveScroll(level, top)}
             />
           </>
         )}

@@ -26,8 +26,6 @@ export interface PeekLevel {
   result?: RefsResult
   /** Index into result.places of the place shown. */
   chosen: number
-  /** Where the shown code was scrolled to. */
-  scroll?: number
 }
 
 export interface PeekState {
@@ -43,8 +41,10 @@ export interface PeekActions {
   drill(t: { name: string; hint: string; col: number; line: number }): void
   peekBack(): void
   choosePlace(i: number): void
-  /** Remembers the code's scroll for the level; changes no display. */
-  saveScroll(levelId: number, top: number): void
+  /** Remembers where the code of the level's chosen place is scrolled to; changes no display. */
+  saveScroll(level: PeekLevel, top: number): void
+  /** Where the code of the level's chosen place was scrolled to, if it was. */
+  scrollOf(level: PeekLevel): number | undefined
 }
 
 export function usePeek(api: string): PeekActions {
@@ -53,6 +53,9 @@ export function usePeek(api: string): PeekActions {
   now.current = peek
   const nextId = useRef(1)
   const running = useRef(new Map<number, AbortController>())
+  // Code scroll by level and chosen place. Kept out of the state: saving it must not redraw.
+  const scrolls = useRef(new Map<string, number>())
+  const scrollKey = (l: PeekLevel) => `${l.id}:${l.chosen}`
 
   const stop = (id: number) => {
     running.current.get(id)?.abort()
@@ -60,7 +63,6 @@ export function usePeek(api: string): PeekActions {
   }
   const stopAll = () => [...running.current.keys()].forEach(stop)
   useEffect(() => stopAll, [])
-  useEffect(stopAll, [api])
 
   const patch = (id: number, p: Partial<PeekLevel>) =>
     setPeek(
@@ -124,6 +126,7 @@ export function usePeek(api: string): PeekActions {
   const openPeek = useCallback(
     (anchor: PeekAnchor, target: PeekTarget) => {
       stopAll()
+      scrolls.current.clear()
       setPeek({ anchor, levels: [start(target)] })
     },
     [api],
@@ -131,26 +134,30 @@ export function usePeek(api: string): PeekActions {
 
   const closePeek = useCallback(() => {
     stopAll()
+    scrolls.current.clear()
     setPeek(null)
   }, [])
+  // Another PR: its lookups are stopped, so close the window rather than leave them loading.
+  useEffect(closePeek, [api])
 
   const drill = useCallback(
     (t: { name: string; hint: string; col: number; line: number }) => {
-      const s = now.current
-      const top = s?.levels[s.levels.length - 1]
+      const levels = now.current?.levels ?? []
+      const top = levels[levels.length - 1]
       const place = top?.result?.places[top.chosen]
-      if (!s || !top || !place) return
+      if (!place) return
       const level = start({ ...t, path: place.path, side: top.target.side })
-      setPeek({ ...s, levels: [...s.levels, level] })
+      setPeek((s) => s && { ...s, levels: [...s.levels, level] })
     },
     [api],
   )
 
   const peekBack = useCallback(() => {
-    const s = now.current
-    if (!s || s.levels.length < 2) return
-    stop(s.levels[s.levels.length - 1].id)
-    setPeek({ ...s, levels: s.levels.slice(0, -1) })
+    const levels = now.current?.levels ?? []
+    if (levels.length < 2) return
+    const top = levels[levels.length - 1].id
+    stop(top)
+    setPeek((s) => s && { ...s, levels: s.levels.filter((l) => l.id !== top) })
   }, [])
 
   const choosePlace = useCallback((i: number) => {
@@ -159,15 +166,15 @@ export function usePeek(api: string): PeekActions {
       const levels = s.levels.slice()
       const top = levels.length - 1
       if (levels[top].chosen === i) return s
-      levels[top] = { ...levels[top], chosen: i, scroll: undefined }
+      levels[top] = { ...levels[top], chosen: i }
       return { ...s, levels }
     })
   }, [])
 
-  const saveScroll = useCallback((levelId: number, top: number) => {
-    const l = now.current?.levels.find((x) => x.id === levelId)
-    if (l) l.scroll = top
+  const saveScroll = useCallback((l: PeekLevel, top: number) => {
+    scrolls.current.set(scrollKey(l), top)
   }, [])
+  const scrollOf = useCallback((l: PeekLevel) => scrolls.current.get(scrollKey(l)), [])
 
   return {
     peek,
@@ -177,5 +184,6 @@ export function usePeek(api: string): PeekActions {
     peekBack,
     choosePlace,
     saveScroll,
+    scrollOf,
   }
 }
