@@ -1085,8 +1085,9 @@ td.flash {
   margin-top: 32px;
 }
 
-/* Peek window (Ctrl+click on a name) */
-.diff tr.peek-row td {
+/* Peek window (Ctrl+click on a name). Child selectors: the code table inside
+   the peek is a .diff too, and its cells must keep the code look. */
+.diff > tbody > tr.peek-row > td {
   padding: 6px 10px 8px 70px;
   background: var(--bg);
   font-family: var(--sans);
@@ -1213,12 +1214,12 @@ td.flash {
 .diff tr.cv-mark td.code {
   box-shadow: inset 3px 0 0 var(--sel-bar);
 }
-.cv-table tr.peek-row td {
+.cv-table > tbody > tr.peek-row > td {
   padding-left: 10px;
 }
 
 @media (max-width: 800px) {
-  .diff tr.peek-row td {
+  .diff > tbody > tr.peek-row > td {
     padding-left: 10px;
   }
   .peek-cols {
