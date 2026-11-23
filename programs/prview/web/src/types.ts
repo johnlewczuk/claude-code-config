@@ -171,3 +171,29 @@ export interface LineRef {
   /** Position in the file's list of diff lines, for ranges. */
   idx: number
 }
+
+/** One place the server found for a name. */
+export interface Place {
+  path: string
+  line: number
+  col: number
+  text: string
+  kind: 'definition' | 'use' | 'comment'
+  changed: boolean
+}
+
+/** What /refs answers for a name. */
+export interface RefsResult {
+  name: string
+  source: 'gopls' | 'name'
+  places: Place[]
+  /** Places found beyond the cap and left out. */
+  more: number
+}
+
+/** A place in a file, as the whole-file view and its URL name it. */
+export interface Spot {
+  path: string
+  line: number
+  side: 'new' | 'old'
+}

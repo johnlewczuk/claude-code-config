@@ -2,7 +2,7 @@ import type { ComponentChildren } from 'preact'
 import { useMemo, useState } from 'preact/hooks'
 import { getJSON } from '../api'
 import { formKey, useReview } from '../ctx'
-import { highlightLine, languageFor } from '../highlight'
+import { languageFor } from '../highlight'
 import {
   fileLines,
   inRange,
@@ -18,8 +18,11 @@ import {
   type Gap,
   type Range,
 } from '../rows'
+import type { PeekAnchor } from '../peek'
 import type { DiffFile, LineRef, Side, Thread } from '../types'
 import { CommentForm } from './CommentForm'
+import { Chip, Code, codeClick, noSelectWithCtrl } from './Code'
+import { Peek } from './Peek'
 import { ThreadView } from './ThreadView'
 
 interface Props {
@@ -62,7 +65,9 @@ export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setV
     if (!src) {
       try {
         const side = file.status === 'deleted' ? 'old' : 'new'
-        const r = await getJSON<{ lines: string[] }>(`${rv.api}/lines?side=${side}&path=${encodeURIComponent(file.status === 'deleted' ? file.oldPath : file.path)}`)
+        const r = await getJSON<{ lines: string[] }>(
+          `${rv.api}/lines?side=${side}&path=${encodeURIComponent(file.status === 'deleted' ? file.oldPath : file.path)}`,
+        )
         src = r.lines
         setSource(src)
       } catch (e) {
@@ -162,12 +167,16 @@ function UnifiedTable({ file, index, rows, lines, lang, byKey, expand }: TablePr
         <td class={`ln ${ref ? 'click' : ''}`} onClick={click}>
           {l.new ?? ''}
         </td>
-        <td class="code">
+        <td
+          class="code"
+          onMouseDown={noSelectWithCtrl}
+          onClick={(e) => ctrlClick(rv, file, index, lang, e, l, l.kind === 'del' ? 'old' : 'new')}
+        >
           <Code line={l} lang={lang} />
         </td>
       </tr>,
     )
-    out.push(...extras(rv, file, lines, l, keysForLine(l), byKey, 4, i))
+    out.push(...extras(rv, file, index, lines, l, keysForLine(l), byKey, 4, i))
   })
   return (
     <table class="diff unified">
@@ -207,7 +216,11 @@ function SplitTable({ file, index, rows, lines, lang, byKey, expand }: TableProp
         >
           {n ?? ''}
         </td>,
-        <td class={`code ${kind} ${sel ? 'sel' : ''} ${l.idx < 0 ? 'more' : ''}`}>
+        <td
+          class={`code ${kind} ${sel ? 'sel' : ''} ${l.idx < 0 ? 'more' : ''}`}
+          onMouseDown={noSelectWithCtrl}
+          onClick={(e) => ctrlClick(rv, file, index, lang, e, l, l.kind === 'del' ? 'old' : 'new')}
+        >
           <Code line={l} lang={lang} />
         </td>,
       ]
@@ -220,7 +233,7 @@ function SplitTable({ file, index, rows, lines, lang, byKey, expand }: TableProp
     )
     const keys = [...(r.left ? keysForLine(r.left, 'LEFT') : []), ...(r.right ? keysForLine(r.right, 'RIGHT') : [])]
     const anchor = r.right ?? r.left!
-    out.push(...extras(rv, file, lines, anchor, [...new Set(keys)], byKey, 6, i, r.left))
+    out.push(...extras(rv, file, index, lines, anchor, [...new Set(keys)], byKey, 6, i, r.left))
   })
   return (
     <table class="diff split">
@@ -244,6 +257,7 @@ function SplitTable({ file, index, rows, lines, lang, byKey, expand }: TableProp
 function extras(
   rv: ReturnType<typeof useReview>,
   file: DiffFile,
+  index: number,
   lines: DLine[],
   l: DLine,
   keys: string[],
@@ -266,6 +280,14 @@ function extras(
         </tr>,
       )
     }
+  if (peekHangsHere(rv.peek?.anchor, index, l, other))
+    out.push(
+      <tr key="peek" class="peek-row">
+        <td colSpan={cols}>
+          <Peek />
+        </td>
+      </tr>,
+    )
   const endsHere = (r: Range | null) =>
     !!r && r.path === file.path && l.idx >= 0 && (r.end.idx === l.idx || (other != null && other.idx === r.end.idx))
   const sel = rv.selection
@@ -290,14 +312,37 @@ function extras(
   return out
 }
 
+/** Ctrl+click on a name in the diff opens the peek window under its line. */
+function ctrlClick(
+  rv: ReturnType<typeof useReview>,
+  file: DiffFile,
+  index: number,
+  lang: string | null,
+  e: MouseEvent,
+  l: DLine,
+  side: 'new' | 'old',
+) {
+  const target = codeClick(e, l.text, lang)
+  const line = side === 'old' ? l.old : l.new
+  if (!target || !line) return
+  rv.openPeek(
+    { fileIndex: index, idx: l.idx, line: l.idx < 0 ? line : undefined },
+    { ...target, path: side === 'old' ? file.oldPath : file.path, side, line },
+  )
+}
+
+function peekHangsHere(a: PeekAnchor | undefined, index: number, l: DLine, other?: DLine | null) {
+  if (!a || 'full' in a || a.fileIndex !== index) return false
+  const same = (x: DLine) => (x.idx >= 0 ? x.idx === a.idx : a.line !== undefined && (x.new ?? x.old) === a.line)
+  return same(l) || (!!other && same(other))
+}
+
 function SelectionBar({ range, lines }: { range: Range; lines: DLine[] }) {
   const rv = useReview()
   const n = range.end.idx - range.start.idx + 1
   return (
     <div class="selbar">
-      <span class="meta">
-        {n === 1 ? `Line ${range.end.line}` : `${n} lines`} selected · shift-click another line to select a range
-      </span>
+      <span class="meta">{n === 1 ? `Line ${range.end.line}` : `${n} lines`} selected · shift-click another line to select a range</span>
       <span class="sp" />
       <button class="btn green" onClick={() => rv.openForm(range)}>
         Comment
@@ -318,7 +363,8 @@ function NewComment({ range, lines }: { range: Range; lines: DLine[] }) {
   const rv = useReview()
   const key = formKey(range)
   const covered = lines.slice(range.start.idx, range.end.idx + 1)
-  const suggestion = range.end.side === 'RIGHT' && range.start.side === 'RIGHT' ? covered.filter((l) => l.kind !== 'del').map((l) => l.text) : null
+  const suggestion =
+    range.end.side === 'RIGHT' && range.start.side === 'RIGHT' ? covered.filter((l) => l.kind !== 'del').map((l) => l.text) : null
   const label =
     range.start.idx === range.end.idx
       ? `Comment on line ${range.end.side === 'LEFT' ? 'L' : 'R'}${range.end.line}`
@@ -382,39 +428,13 @@ function GapRow({ gap, cols, expand }: { gap: Gap; cols: number; expand(g: Gap, 
   )
 }
 
-function Chip({ commit }: { commit?: string }) {
-  const rv = useReview()
-  if (!commit) return null
-  const info = rv.commits.get(commit)
-  if (!info) return <span class="chip unknown">{commit.slice(0, 7)}</span>
-  return (
-    <span
-      class="chip"
-      style={{ background: info.color }}
-      onMouseEnter={(e) => rv.showTip(info, e.currentTarget as HTMLElement)}
-      onMouseLeave={rv.hideTip}
-    >
-      {info.index}/{info.total}
-    </span>
-  )
-}
-
-function Code({ line, lang }: { line: DLine; lang: string | null }) {
-  const mark = line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ' '
-  return (
-    <>
-      <span class="mark">{mark}</span>
-      <span class="src" dangerouslySetInnerHTML={{ __html: highlightLine(line.text, lang) }} />
-    </>
-  )
-}
-
 function LooseThreads({ threads }: { threads: Thread[] }) {
   const [open, setOpen] = useState(threads.some((t) => !t.isResolved))
   return (
     <div class="loose">
       <button class="loose-head" onClick={() => setOpen(!open)}>
-        {open ? '▾' : '▸'} {threads.length} outdated thread{threads.length === 1 ? '' : 's'} (the code they were written on has changed)
+        {open ? '▾' : '▸'} {threads.length} outdated thread
+        {threads.length === 1 ? '' : 's'} (the code they were written on has changed)
       </button>
       {open &&
         threads.map((t) => (

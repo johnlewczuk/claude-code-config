@@ -1,13 +1,14 @@
 import { createContext } from 'preact'
 import { useContext } from 'preact/hooks'
 import type { Range } from './rows'
-import type { LoadPayload, Selection, Thread } from './types'
+import type { PeekActions } from './peek'
+import type { LoadPayload, Selection, Spot, Thread } from './types'
 import type { CommitInfo } from './util'
 
 export type View = 'unified' | 'split'
 
 /** What every part of the review screen can read and do. */
-export interface ReviewApi {
+export interface ReviewApi extends PeekActions {
   data: LoadPayload
   api: string // /api/pr/owner/repo/n
   commits: Map<string, CommitInfo>
@@ -35,7 +36,18 @@ export interface ReviewApi {
   resolve(threadId: string, resolved: boolean): Promise<boolean>
 
   askClaude(sel: Selection | null): void
-  draftWithClaude(req: { instruction: string; selection: Selection | null; thread?: string; current?: string }, onText: (t: string) => void): Promise<string | null>
+  draftWithClaude(
+    req: {
+      instruction: string
+      selection: Selection | null
+      thread?: string
+      current?: string
+    },
+    onText: (t: string) => void,
+  ): Promise<string | null>
+
+  /** Shows a place as the whole file in the middle pane, as a new step of the trail. */
+  openFully(spot: Spot): void
 
   toast(msg: string): void
 }

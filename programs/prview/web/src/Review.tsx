@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { ApiError, getJSON, postJSON, prBase, stream } from './api'
 import { ChatPanel, type ChatHandle } from './components/ChatPanel'
 import { CommitTip } from './components/CommitTip'
 import { Description } from './components/Description'
+import { FileFull } from './components/FileFull'
 import { FileView } from './components/FileView'
 import { OrderPanel } from './components/OrderPanel'
+import { usePeek } from './peek'
 import { SubmitDialog } from './components/SubmitDialog'
 import { TopBar } from './components/TopBar'
 import { formKey, ReviewCtx, type ReviewApi, type View } from './ctx'
+import { hashToSpot, spotToHash } from './nav'
 import { fileLines, type Range } from './rows'
-import type { DiffFile, GHFile, LoadPayload, OrderState, Step, Thread, ThreadsPayload } from './types'
+import type { DiffFile, GHFile, LoadPayload, OrderState, Spot, Step, Thread, ThreadsPayload } from './types'
 import { commitIndex, loadPref, savePref, type CommitInfo } from './util'
 
 interface Props {
@@ -45,6 +48,16 @@ export function Review({ owner, repo, number }: Props) {
   const [tip, setTip] = useState<{ info: CommitInfo; rect: DOMRect } | null>(null)
   const tipTimer = useRef<number>()
   const chat = useRef<ChatHandle>(null)
+  const peekState = usePeek(api)
+  const { closePeek } = peekState
+  const mid = useRef<HTMLElement>(null)
+  // The places opened as whole files, oldest first; the last is on show. Empty: the diff.
+  const [trail, setTrail] = useState<Spot[]>([])
+  const spot = trail[trail.length - 1] ?? null
+  const trailNow = useRef(trail)
+  trailNow.current = trail
+  // What to do once the diff is showing again after Back.
+  const afterBack = useRef<{ scroll?: number; then?: () => void } | null>(null)
 
   const toast = useCallback((msg: string) => {
     const id = Date.now() + Math.random()
@@ -83,6 +96,35 @@ export function Review({ owner, repo, number }: Props) {
   useEffect(() => {
     load()
   }, [load])
+
+  // Back, forward and a reload with a place in the address: the history entry says which trail is on show.
+  useEffect(() => {
+    const first = hashToSpot(location.hash)
+    if (first) {
+      // Put the diff underneath, so Back leaves the place for the diff first.
+      history.replaceState({ trail: [] }, '', location.pathname + location.search)
+      history.pushState({ trail: [first] }, '', location.pathname + location.search + spotToHash(first))
+      setTrail([first])
+    }
+    const onPop = (e: PopStateEvent) => {
+      const fromHash = hashToSpot(location.hash)
+      const t: Spot[] = e.state?.trail ?? (fromHash ? [fromHash] : [])
+      afterBack.current = t.length === 0 ? { scroll: e.state?.scroll, then: afterBack.current?.then } : null
+      closePeek()
+      setTrail(t)
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [closePeek])
+
+  // Back at the diff: put the scroll where it was, or carry on to the jump that asked for the diff.
+  useLayoutEffect(() => {
+    const a = afterBack.current
+    if (spot || !a) return
+    afterBack.current = null
+    if (a.then) a.then()
+    else if (a.scroll !== undefined && mid.current) mid.current.scrollTop = a.scroll
+  }, [spot])
 
   // Poll for the reading order while Claude writes it.
   useEffect(() => {
@@ -155,7 +197,13 @@ export function Review({ owner, repo, number }: Props) {
         setSelection(a.idx <= ref.idx ? { path, start: a, end: ref } : { path, start: ref, end: a })
         return
       }
-      if (selection && selection.path === path && selection.start.idx === ref.idx && selection.end.idx === ref.idx && selection.start.side === ref.side) {
+      if (
+        selection &&
+        selection.path === path &&
+        selection.start.idx === ref.idx &&
+        selection.end.idx === ref.idx &&
+        selection.start.side === ref.side
+      ) {
         setSelection(null)
         anchor.current = null
         return
@@ -226,6 +274,15 @@ export function Review({ owner, repo, number }: Props) {
       }
       return result
     },
+    ...peekState,
+    openFully(s) {
+      // Remember where the diff was scrolled to, so Back lands there.
+      if (!trailNow.current.length) history.replaceState({ trail: [], scroll: mid.current?.scrollTop }, '')
+      const next = [...trailNow.current, s]
+      history.pushState({ trail: next }, '', location.pathname + location.search + spotToHash(s))
+      closePeek()
+      setTrail(next)
+    },
     toast,
   }
 
@@ -285,6 +342,12 @@ export function Review({ owner, repo, number }: Props) {
     })
 
   const jumpTo = (path: string, step?: Step, stepIndex?: number) => {
+    if (spot) {
+      // Go back to the diff first, then jump once it is showing.
+      afterBack.current = { then: () => jumpTo(path, step, stepIndex) }
+      history.go(-trail.length)
+      return
+    }
     if (stepIndex !== undefined) setCurrentStep(stepIndex)
     const fi = files.findIndex((f) => f.path === path || f.oldPath === path)
     if (fi < 0) return
@@ -299,7 +362,10 @@ export function Review({ owner, repo, number }: Props) {
       }
       el ??= document.getElementById(`file-${fi}`)
       if (!el) return
-      el.scrollIntoView({ block: el.id ? 'start' : 'center', behavior: 'smooth' })
+      el.scrollIntoView({
+        block: el.id ? 'start' : 'center',
+        behavior: 'smooth',
+      })
       el.classList.remove('flash')
       void (el as HTMLElement).offsetWidth
       el.classList.add('flash')
@@ -344,20 +410,23 @@ export function Review({ owner, repo, number }: Props) {
             currentStep={currentStep}
             jumpTo={jumpTo}
           />
-          <main class="mid">
-            <Description />
-            {ordered.map(({ file, index }) => (
-              <FileView
-                key={file.path}
-                file={file}
-                index={index}
-                viewed={viewedOf(file.path)}
-                collapsed={collapsed.has(file.path)}
-                toggleCollapsed={() => toggleCollapsed(file.path)}
-                setViewed={(v) => setViewed(file.path, v)}
-              />
-            ))}
-            {files.length === 0 && <div class="empty">This PR changes no files.</div>}
+          <main class="mid" ref={mid}>
+            {spot && <FileFull spot={spot} trail={trail} />}
+            <div hidden={!!spot}>
+              <Description />
+              {ordered.map(({ file, index }) => (
+                <FileView
+                  key={file.path}
+                  file={file}
+                  index={index}
+                  viewed={viewedOf(file.path)}
+                  collapsed={collapsed.has(file.path)}
+                  toggleCollapsed={() => toggleCollapsed(file.path)}
+                  setViewed={(v) => setViewed(file.path, v)}
+                />
+              ))}
+              {files.length === 0 && <div class="empty">This PR changes no files.</div>}
+            </div>
           </main>
           {chatOpen && data.claude && <ChatPanel ref={chat} />}
         </div>
@@ -373,7 +442,9 @@ export function Review({ owner, repo, number }: Props) {
             onMoved={() => setMoved(true)}
           />
         )}
-        {tip && <CommitTip info={tip.info} rect={tip.rect} keep={() => clearTimeout(tipTimer.current)} leave={() => reviewApi!.hideTip()} />}
+        {tip && (
+          <CommitTip info={tip.info} rect={tip.rect} keep={() => clearTimeout(tipTimer.current)} leave={() => reviewApi!.hideTip()} />
+        )}
         <div class="toasts">
           {toasts.map((t) => (
             <div key={t.id} class="toast">
@@ -422,4 +493,3 @@ function nearestLine(lines: ReturnType<typeof fileLines>, side: 'new' | 'old', n
   }
   return best
 }
-
