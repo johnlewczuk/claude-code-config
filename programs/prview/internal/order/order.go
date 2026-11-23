@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/code"
 )
 
 // Step is one place to read.
@@ -36,8 +38,6 @@ type Order struct {
 var (
 	headingRe = regexp.MustCompile(`(?i)suggested\s+reading\s+order`)
 	itemRe    = regexp.MustCompile(`^\s*\d+[.)]\s+(.*)$`)
-	// Lines that start a definition in common languages.
-	defWords = regexp.MustCompile(`^\s*(func|def|fn|function|class|struct|interface|type|enum|impl|pub|static|async|export|public|private|protected|void|const|let|var)\b`)
 	// A file path: has a dot or a slash, no spaces.
 	pathRe = regexp.MustCompile(`^[A-Za-z0-9_./+@-]*[./][A-Za-z0-9_./+@-]*$`)
 )
@@ -130,9 +130,7 @@ func Locate(lines []string, fn string) int {
 			if strings.HasPrefix(t, "//") || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "*") {
 				continue
 			}
-			// A definition: starts with a keyword, or (C/C++) the name
-			// followed by "(" at the end of a line not ending in ";".
-			if defWords.MatchString(l) || (strings.Contains(l, name+"(") && !strings.HasSuffix(t, ";") && !strings.HasPrefix(l, " ") && !strings.HasPrefix(l, "\t")) {
+			if code.IsDefinition(l, name) {
 				return i + 1
 			}
 			if best == 0 {
