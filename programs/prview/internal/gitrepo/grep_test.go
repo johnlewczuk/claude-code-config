@@ -56,3 +56,31 @@ func TestGrepLiteral(t *testing.T) {
 		t.Fatalf("$v: %+v", ms)
 	}
 }
+
+// A path with ":" or a quote in it comes out as it is, and a very long line
+// is cut rather than ending the search.
+func TestGrepOddPathsAndLongLines(t *testing.T) {
+	tr := newTestRepo(t)
+	head := tr.commit("one", map[string]string{
+		`a:b "c".go`: lines("Run()"),
+		"bundle.js":  lines("var x=Run()" + strings.Repeat(";", 5<<20)),
+		"z.go":       lines("Run()"),
+	})
+	r := &Repo{Dir: tr.dir}
+	ms, _, err := r.Grep(context.Background(), head, "Run", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, m := range ms {
+		size := fmt.Sprint(len(m.Text))
+		if len(m.Text) > maxGrepLine-100 && len(m.Text) <= maxGrepLine {
+			size = "cut"
+		}
+		got = append(got, fmt.Sprintf("%s:%d:%d %s", m.Path, m.Line, m.Col, size))
+	}
+	want := []string{`a:b "c".go:1:1 5`, "bundle.js:1:7 cut", "z.go:1:1 5"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %v", got)
+	}
+}

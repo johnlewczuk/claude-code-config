@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -236,8 +237,10 @@ func (r *Repo) fetchMissing(ctx context.Context, oids []string) error {
 // word, in path order. It returns at most max of them and how many more it
 // left out.
 func (r *Repo) Grep(ctx context.Context, rev, name string, max int) (ms []code.Match, more int, err error) {
-	full := append([]string{"-C", r.Dir, "-c", "core.quotepath=off"}, r.authArgs()...)
-	full = append(full, "grep", "-I", "-n", "--column", "-w", "-F", "-e", name, rev, "--")
+	// -z puts a NUL after the path, line and column, so a path may hold any
+	// character and comes out as it is.
+	full := append([]string{"-C", r.Dir}, r.authArgs()...)
+	full = append(full, "grep", "-z", "-I", "-n", "--column", "-w", "-F", "-e", name, rev, "--")
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	var stderr bytes.Buffer
@@ -249,10 +252,15 @@ func (r *Repo) Grep(ctx context.Context, rev, name string, max int) (ms []code.M
 	if err := cmd.Start(); err != nil {
 		return nil, 0, err
 	}
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 64*1024), 4<<20)
-	for sc.Scan() {
-		m, ok := parseGrepLine(strings.TrimPrefix(sc.Text(), rev+":"))
+	rd := bufio.NewReader(stdout)
+	var readErr error
+	for {
+		var line string
+		line, readErr = readLine(rd, maxGrepLine)
+		if readErr != nil {
+			break
+		}
+		m, ok := parseGrepLine(strings.TrimPrefix(line, rev+":"))
 		if !ok {
 			continue
 		}
@@ -262,7 +270,6 @@ func (r *Repo) Grep(ctx context.Context, rev, name string, max int) (ms []code.M
 			more++
 		}
 	}
-	scanErr := sc.Err()
 	if err := cmd.Wait(); err != nil {
 		// Exit status 1 means nothing matched.
 		var ee *exec.ExitError
@@ -271,12 +278,36 @@ func (r *Repo) Grep(ctx context.Context, rev, name string, max int) (ms []code.M
 		}
 		return nil, 0, fmt.Errorf("git grep: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	return ms, more, scanErr
+	if readErr != io.EOF {
+		return nil, 0, readErr
+	}
+	return ms, more, nil
 }
 
-// parseGrepLine reads "path:line:col:text".
+// maxGrepLine is how much of one grep line is kept. A longer line (a
+// committed minified bundle, say) is cut, not a reason to stop reading.
+const maxGrepLine = 64 * 1024
+
+// readLine reads up to the next newline and returns the line without it,
+// keeping at most limit bytes of it.
+func readLine(r *bufio.Reader, limit int) (string, error) {
+	var line []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		line = append(line, chunk[:min(len(chunk), limit-len(line))]...)
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if err == io.EOF && len(line) > 0 {
+			err = nil
+		}
+		return string(bytes.TrimSuffix(line, []byte("\n"))), err
+	}
+}
+
+// parseGrepLine reads "path\x00line\x00col\x00text".
 func parseGrepLine(s string) (code.Match, bool) {
-	f := strings.SplitN(s, ":", 4)
+	f := strings.SplitN(s, "\x00", 4)
 	if len(f) < 4 {
 		return code.Match{}, false
 	}
