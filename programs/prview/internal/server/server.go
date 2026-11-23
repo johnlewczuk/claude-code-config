@@ -12,14 +12,17 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"path"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/claude"
 	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/github"
 	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/gitrepo"
+	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/gopls"
 )
 
 //go:embed all:dist
@@ -51,6 +54,14 @@ type Server struct {
 
 	stop func() // shuts the server down; set by the caller that runs it
 
+	gopls    *gopls.Pool // nil when gopls isn't installed
+	goplsMu  sync.Mutex
+	goplsHot map[string]bool // session keys that have already answered once
+
+	// checkout puts the loaded head in a folder and returns it. It is
+	// s.worktree except in tests.
+	checkout func(*http.Request, *prState) (string, error)
+
 	mu    sync.Mutex
 	prs   map[string]*prState
 	repos map[string]*gitrepo.Repo
@@ -61,8 +72,22 @@ func (s *Server) OnStop(f func()) { s.stop = f }
 
 // New makes a server. claudeRunner may be nil.
 func New(gh GitHub, claudeRunner *claude.Runner, cacheDir, key string) *Server {
-	return &Server{gh: gh, claude: claudeRunner, cache: cacheDir, key: key,
-		prs: map[string]*prState{}, repos: map[string]*gitrepo.Repo{}}
+	s := &Server{gh: gh, claude: claudeRunner, cache: cacheDir, key: key,
+		prs: map[string]*prState{}, repos: map[string]*gitrepo.Repo{}, goplsHot: map[string]bool{}}
+	s.checkout = s.worktree
+	if bin, err := exec.LookPath("gopls"); err == nil {
+		s.gopls = gopls.NewPool(s.startGopls(bin), 10*time.Minute, 3)
+	} else {
+		log.Printf("exact Go lookups off: %v", err)
+	}
+	return s
+}
+
+// Close stops the programs the server started.
+func (s *Server) Close() {
+	if s.gopls != nil {
+		s.gopls.Close()
+	}
 }
 
 // CookieName holds the access key in the browser (and in `prview stop`).
