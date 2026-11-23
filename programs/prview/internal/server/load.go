@@ -27,6 +27,8 @@ type prState struct {
 	head  string // head commit the page was loaded at
 	files []diff.File
 
+	treeReady map[string]bool // revs whose files are all downloaded
+
 	ord        *order.Order
 	ordErr     string
 	ordRunning bool

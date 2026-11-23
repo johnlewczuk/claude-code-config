@@ -95,6 +95,7 @@ func (s *Server) Handler() http.Handler {
 	api("GET /load", s.handleLoad)
 	api("GET /head", s.handleHead)
 	api("GET /lines", s.handleLines)
+	api("GET /refs", s.handleRefs)
 	api("GET /threads", s.handleThreads)
 	api("GET /order", s.handleOrder)
 	api("POST /order/redo", s.handleOrderRedo)
