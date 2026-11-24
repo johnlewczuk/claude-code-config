@@ -632,8 +632,10 @@ col.col-ln {
   cursor: pointer;
   padding: 0 6px;
 }
+/* Wraps like the code does, so a long one stays inside a narrow code column. */
 .gap-header {
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .diff tr.thread-row td {
   padding: 4px 10px 8px 70px;
