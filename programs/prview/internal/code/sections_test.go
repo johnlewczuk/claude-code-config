@@ -29,6 +29,26 @@ func TestSections(t *testing.T) {
 			"type S struct {", // 14
 			"}",
 		}, []Section{{"", 1, 4}, {"A", 6, 10}, {"B", 12, 12}, {"S", 14, 15}}},
+		{"go imports", "a.go", []string{
+			"package x", // 1
+			"",
+			"import (",
+			"\t\"fmt\"",
+			"\tstr \"strings\"",
+			")",
+			"",
+			"func A() {}", // 8
+		}, []Section{{"", 1, 6}, {"A", 8, 8}}},
+		{"cpp namespace", "a.cc", []string{
+			"#include <string>", // 1
+			"using std::string;",
+			"namespace app {",
+			"",
+			"int Run() {", // 5
+			"}",
+			"",
+			"}  // namespace app",
+		}, []Section{{"", 1, 3}, {"Run", 5, 8}}},
 		{"cpp", "a.cc", []string{
 			"class Foo {", // 1
 			"  void run();",
@@ -67,5 +87,22 @@ func TestSections(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDefinedNameColumn(t *testing.T) {
+	for _, c := range []struct {
+		line, name string
+		col        int
+	}{
+		{"func (r *Runner) Run() {", "Run", 18},
+		{"  void Node::Run() {", "Run", 14},
+		{"export const g = (a: number) => {", "g", 14},
+		{"int Run();", "Run", 5},
+		{"\tx.Run()", "", 0},
+	} {
+		if name, col := DefinedName(c.line); name != c.name || col != c.col {
+			t.Errorf("%q: got %q at %d, want %q at %d", c.line, name, col, c.name, c.col)
+		}
 	}
 }

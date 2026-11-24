@@ -34,8 +34,9 @@ type prState struct {
 	ordRunning bool
 	ordGen     int // bumps on every reload/redo so stale runs are ignored
 
-	sums   map[string]*fileSum // file summaries by path
-	sumGen int                 // bumps on every reload so a stale run is ignored
+	sums    map[string]*fileSum // file summaries by path
+	sumGen  int                 // bumps on every new run so a stale run is ignored
+	sumDiff string              // base..head of the run
 
 	chatMu sync.Mutex // one question at a time per PR
 }

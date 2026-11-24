@@ -68,7 +68,8 @@ var statementWords = map[string]bool{
 // *Server) Run()" defines Run, not Server, and "const user = getUser(id)"
 // defines user, not getUser.
 func IsDefinition(line, name string) bool {
-	return name != "" && DefinedName(line) == name
+	defined, _ := DefinedName(line)
+	return name != "" && defined == name
 }
 
 // commentPrefixes gives the ways a whole-line comment can start, by file

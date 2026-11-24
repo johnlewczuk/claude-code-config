@@ -114,6 +114,23 @@ func TestFileSummariesRun(t *testing.T) {
 	}
 }
 
+func TestFileSummariesReloadKeepsRun(t *testing.T) {
+	fs := &fakeSummarizer{gate: make(chan struct{})}
+	f := newSummaryFixture(t, map[string]string{"README": "x\n"}, fs)
+	st := f.s.prs["o/r/1"]
+	f.s.startSummaries(st)
+	waitSummaries(t, f, func(summariesPayload) bool { return fs.calls.Load() == 3 })
+	f.s.startSummaries(st) // a reload of the same head while the calls run
+	if v := getSummaries(t, f).Files["a.go"]; v.Status != "running" {
+		t.Errorf("a.go went back to %+v", v)
+	}
+	close(fs.gate)
+	waitSummaries(t, f, allSettled)
+	if n := fs.calls.Load(); n != 3 {
+		t.Errorf("%d calls, want 3", n)
+	}
+}
+
 func TestFileSummariesStaleRun(t *testing.T) {
 	fs := &fakeSummarizer{gate: make(chan struct{})}
 	f := newSummaryFixture(t, map[string]string{"README": "x\n"}, fs)

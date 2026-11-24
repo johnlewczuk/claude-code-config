@@ -5,16 +5,24 @@ import (
 	"strings"
 )
 
-// DefinedName returns the name the line defines, or "" when it defines
-// nothing. See IsDefinition for what counts.
-func DefinedName(line string) string {
-	name, _ := define(line)
-	return name
+// DefinedName returns the name the line defines and the 1-based byte column
+// where that name starts, or "" and 0 when the line defines nothing. See
+// IsDefinition for what counts.
+func DefinedName(line string) (name string, col int) {
+	d := define(line)
+	return d.name, d.at + 1
 }
 
-// define is DefinedName that also says whether what it defines is a plain
-// value (a constant, variable or field) rather than a function or type.
-func define(line string) (name string, value bool) {
+// definition is what a line defines.
+type definition struct {
+	name  string
+	at    int  // where name starts in the line, in bytes from 0; -1 with no name
+	value bool // a plain value (a constant, variable or field), not a function or type
+}
+
+var noDefinition = definition{at: -1}
+
+func define(line string) definition {
 	rest := strings.TrimLeft(line, " \t")
 	indented := len(rest) < len(line)
 	skipped := false // a modifier or a definition word came first
@@ -26,11 +34,19 @@ func define(line string) (name string, value bool) {
 		}
 		return m
 	}
+	// in turns a place in rest into a place in line.
+	in := func(d definition) definition {
+		if d.name != "" {
+			d.at += len(line) - len(rest)
+		}
+		return d
+	}
 	skip(modifiers)
 	w := skip(defWord)
 	if w == nil {
-		n, isCall := declaredName(rest, indented, skipped, line)
-		return n, !isCall
+		d, isCall := declaredName(rest, indented, skipped, line)
+		d.value = !isCall
+		return in(d)
 	}
 	skip(receiver)
 	skip(typeParams)
@@ -40,47 +56,53 @@ func define(line string) (name string, value bool) {
 	// "const std::string& name()" defines name, not string.
 	isValueWord := w[1] == "let" || w[1] == "var" || w[1] == "val" || w[1] == "const"
 	if cTypeWords[w[1]] {
-		if n, isCall := declaredName(rest, indented, skipped, line); n != "" {
-			return n, w[1] == "const" && !isCall
+		if d, isCall := declaredName(rest, indented, skipped, line); d.name != "" {
+			d.value = w[1] == "const" && !isCall
+			return in(d)
 		}
 	}
-	if m := firstName.FindStringSubmatch(rest); m != nil {
-		return m[1], isValueWord
+	if m := firstName.FindStringSubmatchIndex(rest); m != nil {
+		return in(definition{name: rest[m[2]:m[3]], at: m[2], value: isValueWord})
 	}
-	return "", false
+	return noDefinition
 }
 
 // declaredName reads a C and C++ style declaration: a type, then the name.
-// isCall says the name is followed by "(".
-func declaredName(rest string, indented, skipped bool, line string) (name string, isCall bool) {
+// The definition's place is in rest. isCall says the name is followed by "(".
+func declaredName(rest string, indented, skipped bool, line string) (d definition, isCall bool) {
 	// A type, then the name: int helper(), void Node::Run(), public
 	// getUser(), static const int kMax = 5.
-	m := declarator.FindStringSubmatch(rest)
+	m := declarator.FindStringSubmatchIndex(rest)
 	if m == nil {
-		return "", false
+		return noDefinition, false
 	}
-	for _, w := range words.FindAllString(m[1], -1) {
+	typ, follow := "", rest[m[6]:m[7]]
+	if m[2] >= 0 {
+		typ = rest[m[2]:m[3]]
+	}
+	for _, w := range words.FindAllString(typ, -1) {
 		if statementWords[w] {
-			return "", false
+			return noDefinition, false
 		}
 	}
-	isCall = m[3] == "("
+	found := definition{name: rest[m[4]:m[5]], at: m[4]}
+	isCall = follow == "("
 	switch {
 	case skipped:
-		return m[2], isCall
+		return found, isCall
 	case !isCall:
 		// "x, y = f()" and "err := f()" assign; only a modifier or a
 		// definition word makes these a declaration.
-		return "", false
-	case m[1] != "":
-		return m[2], true
+		return noDefinition, false
+	case typ != "":
+		return found, true
 	}
 	// No type: a constructor (Foo::Foo(...)) or a function whose return type
 	// is on the line above, at the start of a line not ending in ";".
 	if !indented && !strings.HasSuffix(strings.TrimSpace(line), ";") {
-		return m[2], true
+		return found, true
 	}
-	return "", false
+	return noDefinition, false
 }
 
 // Section is a run of lines of a file: its top, or one function or type
@@ -101,6 +123,14 @@ var method = regexp.MustCompile(`^(?:(?:public|private|protected|static|async|ov
 // function, as in "export const g = (a: number) => {".
 var arrowFunc = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:const|let|var)\s+\w+[^=]*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]+)?=>|\w+\s*=>)`)
 
+// preamble matches a line that brings in other code or says which package
+// the file is in. Such lines belong to the top of the file.
+var preamble = regexp.MustCompile(`^(?:import|package|#\s*include|from\s+\S+\s+import|using|require)\b`)
+
+// namespace matches a namespace or module opener. It holds the file's
+// sections rather than being one, so it belongs to the section above it.
+var namespace = regexp.MustCompile(`^(?:(?:export|declare)\s+)*(?:namespace|module)\b`)
+
 func indentOf(line string) int {
 	return len(line) - len(strings.TrimLeft(line, " \t"))
 }
@@ -110,14 +140,16 @@ func indentOf(line string) int {
 // starts at the comment directly above its definition and runs to the line
 // before the next section, minus trailing blank lines. Definitions at the
 // left edge always start a section; indented ones only when they are direct
-// members of a type (class, struct, interface, impl, trait or enum), so
-// locals inside a function don't. Constants, variables and fields never do, except those holding a function.
+// members of a type (class, struct, interface, impl, trait or enum) or a
+// namespace, so locals inside a function don't. Constants, variables and
+// fields never do, except those holding a function. Imports, package lines
+// and namespace openers never do either.
 func Sections(path string, lines []string) []Section {
 	type def struct {
 		name  string
 		start int // 0-based, comment included
 	}
-	// A type body being read: where its opener sits and how far its members
+	// A type or namespace body being read: where its opener sits and how far its members
 	// are indented (-1 until the first member line).
 	type body struct{ indent, member int }
 	var defs []def
@@ -138,12 +170,14 @@ func Sections(path string, lines []string) []Section {
 			}
 			inBody = ind == top.member
 		}
-		if ind > 0 && !inBody {
+		trimmed := strings.TrimLeft(l, " \t")
+		if (ind > 0 && !inBody) || preamble.MatchString(trimmed) {
 			continue
 		}
-		name, value := define(l)
+		d := define(l)
+		name, value := d.name, d.value
 		if name == "" && inBody {
-			if m := method.FindStringSubmatch(strings.TrimLeft(l, " \t")); m != nil && !statementWords[m[1]] && m[1] != "catch" {
+			if m := method.FindStringSubmatch(trimmed); m != nil && !statementWords[m[1]] && m[1] != "catch" {
 				name, value = m[1], false
 			}
 		}
@@ -153,10 +187,10 @@ func Sections(path string, lines []string) []Section {
 		if value && ind == 0 && arrowFunc.MatchString(l) {
 			value = false
 		}
-		isOpener := typeOpener.MatchString(strings.TrimLeft(l, " \t"))
+		isOpener := typeOpener.MatchString(trimmed)
 		// A member declared without a body (a prototype) is not a section.
 		prototype := ind > 0 && strings.HasSuffix(strings.TrimSpace(l), ";")
-		if !value && !prototype {
+		if !value && !prototype && !namespace.MatchString(trimmed) {
 			start := i
 			for start > 0 && strings.TrimSpace(lines[start-1]) != "" && IsCommentOnly(path, lines[start-1]) {
 				start--

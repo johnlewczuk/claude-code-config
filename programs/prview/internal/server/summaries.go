@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/code"
@@ -17,10 +16,16 @@ import (
 )
 
 const (
-	summaryWorkers        = 4
+	summaryWorkers        = 4 // file summaries written at once in the background
+	askWorkers            = 2 // section summaries and redone file summaries asked at once
 	fileSummaryTimeout    = 2 * time.Minute
 	sectionSummaryTimeout = 60 * time.Second
 	sectionUses           = 20
+	// sectionUsesWait is how long a section summary waits for the list of
+	// places its name is used; usesLookupLimit is how long that lookup may
+	// carry on after the summary stopped waiting for it.
+	sectionUsesWait = 5 * time.Second
+	usesLookupLimit = 2 * time.Minute
 )
 
 // fileSum is where one file's summary stands.
@@ -54,13 +59,19 @@ func (s *Server) setSummarize() {
 }
 
 // startSummaries starts writing a summary for every file of the loaded PR,
-// four at a time, in the background. A later call replaces the run.
+// four at a time, in the background. A load of the same diff keeps the run
+// there is; a load of a new one replaces it.
 func (s *Server) startSummaries(st *prState) {
 	if s.summarize == nil {
 		return
 	}
 	st.mu.Lock()
 	pr, base, head, files := st.pr, st.base, st.head, st.files
+	if pr == nil || st.sumDiff == base+".."+head {
+		st.mu.Unlock()
+		return
+	}
+	st.sumDiff = base + ".." + head
 	st.sumGen++
 	gen := st.sumGen
 	st.sums = make(map[string]*fileSum, len(files))
@@ -68,28 +79,32 @@ func (s *Server) startSummaries(st *prState) {
 		st.sums[f.Path] = &fileSum{Status: "waiting"}
 	}
 	st.mu.Unlock()
-	if pr == nil {
-		return
-	}
 
 	queue := make(chan diff.File)
-	var wg sync.WaitGroup
 	for i := 0; i < summaryWorkers; i++ {
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
 			for f := range queue {
 				s.summarizeFile(st, gen, pr.Title, pr.Body, base, head, f, false)
 			}
 		}()
 	}
 	go func() {
-		defer wg.Wait()
 		defer close(queue)
 		for _, f := range files {
 			queue <- f
 		}
 	}()
+}
+
+// ask runs one summary the user asked for, at most askWorkers at a time.
+func (s *Server) ask(ctx context.Context, system, prompt string) (string, error) {
+	select {
+	case s.asks <- struct{}{}:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	defer func() { <-s.asks }()
+	return s.summarize(ctx, system, prompt)
 }
 
 // setSum records one file's state, unless a newer run has replaced this one.
@@ -107,6 +122,8 @@ func (st *prState) currentGen(gen int) bool {
 	return st.sumGen == gen
 }
 
+// summarizeFile writes one file's summary. redo asks Claude even when a
+// saved copy exists, and waits for a free place among the asks.
 func (s *Server) summarizeFile(st *prState, gen int, title, body, base, head string, f diff.File, redo bool) {
 	if reason := summary.Skip(f); reason != "" {
 		st.setSum(gen, f.Path, fileSum{Status: "skipped", Text: reason})
@@ -132,7 +149,11 @@ func (s *Server) summarizeFile(st *prState, gen int, title, body, base, head str
 	if err != nil {
 		text = nil // the diff alone still says enough
 	}
-	out, err := s.summarize(ctx, summary.FileSystem, summary.FilePrompt(title, body, f, text))
+	call := s.summarize
+	if redo {
+		call = s.ask
+	}
+	out, err := call(ctx, summary.FileSystem, summary.FilePrompt(title, body, f, text))
 	if err == nil && out == "" {
 		err = errors.New("claude sent back an empty summary")
 	}
@@ -147,22 +168,23 @@ func (s *Server) summarizeFile(st *prState, gen int, title, body, base, head str
 	st.setSum(gen, f.Path, fileSum{Status: "ready", Text: out})
 }
 
-func (st *prState) summariesPayload(off string) summariesPayload {
+// fileSums returns a copy of where each file's summary stands.
+func (st *prState) fileSums() map[string]*fileSum {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	p := summariesPayload{Off: off, Files: map[string]*fileSum{}}
+	out := make(map[string]*fileSum, len(st.sums))
 	for path, v := range st.sums {
 		c := *v
-		p.Files[path] = &c
+		out[path] = &c
 	}
-	return p
+	return out
 }
 
 func (s *Server) summariesPayload(st *prState) summariesPayload {
 	if s.summarize == nil {
 		return summariesPayload{Off: "the claude command isn't installed, so there are no summaries", Files: map[string]*fileSum{}}
 	}
-	return st.summariesPayload("")
+	return summariesPayload{Files: st.fileSums()}
 }
 
 func (s *Server) handleSummaries(w http.ResponseWriter, r *http.Request, st *prState) {
@@ -195,16 +217,17 @@ func (s *Server) handleSummariesRedo(w http.ResponseWriter, r *http.Request, st 
 		return
 	}
 	f, pr, base, head, gen := *file, st.pr, st.base, st.head, st.sumGen
-	if v := st.sums[f.Path]; v != nil && (v.Status == "running" || v.Status == "skipped") {
+	// A file still waiting gets its summary from the background run.
+	if v := st.sums[f.Path]; v == nil || v.Status == "waiting" || v.Status == "running" || v.Status == "skipped" {
 		st.mu.Unlock()
-		writeJSON(w, st.summariesPayload(""))
+		writeJSON(w, s.summariesPayload(st))
 		return
 	}
 	st.sums[f.Path] = &fileSum{Status: "waiting"}
 	st.mu.Unlock()
 
 	go s.summarizeFile(st, gen, pr.Title, pr.Body, base, head, f, true)
-	writeJSON(w, st.summariesPayload(""))
+	writeJSON(w, s.summariesPayload(st))
 }
 
 // revFor returns the commit a side of the diff reads from.
@@ -292,17 +315,17 @@ func (s *Server) handleSectionSummary(w http.ResponseWriter, r *http.Request, st
 		Path: req.Path, Name: req.Name, FileSummary: fileSummary,
 		Lines: summary.MarkSection(file, req.Side, text, req.Start, req.End),
 	}
-	if req.Name != "" {
-		in.Uses = s.sectionUses(r, st, req, text)
-	}
 	key := summary.SectionKey(req.Path, in.Lines)
 	if out, ok := s.store.Get("sections", key); ok {
 		writeJSON(w, map[string]string{"summary": out})
 		return
 	}
+	if req.Name != "" {
+		in.Uses = s.sectionUses(r, st, req, text)
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), sectionSummaryTimeout)
 	defer cancel()
-	out, err := s.summarize(ctx, summary.SectionSystem, summary.SectionPrompt(in))
+	out, err := s.ask(ctx, summary.SectionSystem, summary.SectionPrompt(in))
 	if err == nil && out == "" {
 		err = errors.New("claude sent back an empty summary")
 	}
@@ -317,22 +340,40 @@ func (s *Server) handleSectionSummary(w http.ResponseWriter, r *http.Request, st
 }
 
 // sectionUses lists where the section's name is used, the way Ctrl+click
-// does. A failed lookup means no uses.
+// does. It waits at most sectionUsesWait; past that, or when the lookup
+// fails, there are no uses. A lookup still running then carries on in the
+// background, so gopls or the downloaded files are ready next time.
 func (s *Server) sectionUses(r *http.Request, st *prState, req sectionRequest, text []string) []code.Place {
-	for n := req.Start; n <= req.End && n <= len(text); n++ {
-		if code.DefinedName(text[n-1]) != req.Name {
-			continue
+	q := refsQuery{Path: req.Path, Side: req.Side, Name: req.Name}
+	for n := req.Start; n <= req.End && n <= len(text) && q.Line == 0; n++ {
+		if name, col := code.DefinedName(text[n-1]); name == req.Name {
+			q.Line, q.Col = n, col
 		}
-		col := strings.Index(text[n-1], req.Name) + 1
-		p, err := s.refs(r.Context(), r, st, refsQuery{Path: req.Path, Side: req.Side, Name: req.Name, Line: n, Col: col}, func(string) {})
+	}
+	if q.Line == 0 {
+		return nil
+	}
+	found := make(chan []code.Place, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), usesLookupLimit)
+		defer cancel()
+		p, err := s.refs(ctx, r.WithContext(ctx), st, q, func(string) {})
 		if err != nil || p == nil {
-			return nil
+			found <- nil
+			return
 		}
 		places := p.Places
 		if len(places) > sectionUses {
 			places = places[:sectionUses]
 		}
+		found <- places
+	}()
+	select {
+	case places := <-found:
 		return places
+	case <-time.After(sectionUsesWait):
+		return nil
+	case <-r.Context().Done():
+		return nil
 	}
-	return nil
 }

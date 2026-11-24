@@ -62,6 +62,7 @@ type Server struct {
 	// claude isn't installed. Tests replace it.
 	summarize func(ctx context.Context, system, prompt string) (string, error)
 	store     summary.Store // saved summaries
+	asks      chan struct{} // a place for each summary the user asked for that is running
 
 	// checkout puts the loaded head in a folder and returns the folder and
 	// the head. It is s.worktree except in tests.
@@ -78,7 +79,7 @@ func (s *Server) OnStop(f func()) { s.stop = f }
 // New makes a server. claudeRunner may be nil.
 func New(gh GitHub, claudeRunner *claude.Runner, cacheDir, key string) *Server {
 	s := &Server{gh: gh, claude: claudeRunner, cache: cacheDir, key: key,
-		prs: map[string]*prState{}, repos: map[string]*gitrepo.Repo{}}
+		prs: map[string]*prState{}, repos: map[string]*gitrepo.Repo{}, asks: make(chan struct{}, askWorkers)}
 	s.checkout = s.worktree
 	s.store = summary.Store{Dir: filepath.Join(cacheDir, "summaries")}
 	s.setSummarize()
