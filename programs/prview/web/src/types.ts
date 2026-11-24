@@ -171,3 +171,68 @@ export interface LineRef {
   /** Position in the file's list of diff lines, for ranges. */
   idx: number
 }
+
+/** One place the server found for a name. */
+export interface Place {
+  path: string
+  line: number
+  col: number
+  text: string
+  kind: 'definition' | 'use' | 'comment'
+  changed: boolean
+}
+
+/** What /refs answers for a name. */
+export interface RefsResult {
+  name: string
+  source: 'gopls' | 'name'
+  places: Place[]
+  /** Places found beyond the cap and left out. */
+  more: number
+}
+
+/** A place in a file, as the whole-file view and its URL name it. */
+export interface Spot {
+  path: string
+  line: number
+  side: 'new' | 'old'
+}
+
+/** Where one file's summary stands. */
+export interface FileSum {
+  status: 'waiting' | 'running' | 'ready' | 'failed' | 'skipped'
+  /** The summary, or the reason the file was skipped. */
+  text: string
+  error: string
+}
+
+/** What /summaries answers. */
+export interface SummariesPayload {
+  /** Why there are no summaries at all, if there are none. */
+  off: string
+  files: Record<string, FileSum>
+}
+
+/** A part of a file prview found: the top of the file (name ""), then each function or type. */
+export interface Section {
+  name: string
+  start: number
+  end: number
+}
+
+/** Lines to summarize: a section, or lines the reviewer selected (name ""). */
+export interface NoteReq {
+  path: string
+  side: 'new' | 'old'
+  start: number
+  end: number
+  name: string
+}
+
+/** A summary of some lines, shown under them in the diff. */
+export interface Note {
+  req: NoteReq
+  status: 'running' | 'ready' | 'failed'
+  text: string
+  error: string
+}

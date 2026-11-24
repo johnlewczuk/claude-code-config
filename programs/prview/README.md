@@ -1,6 +1,6 @@
 # prview
 
-A local web page for reviewing GitHub pull requests, with three things
+A local web page for reviewing GitHub pull requests, with five things
 github.com doesn't give you:
 
 - **Which commit changed each line.** Every added or removed line has a tag
@@ -12,6 +12,20 @@ github.com doesn't give you:
 - **Claude beside the diff.** Select lines and ask about them, or have Claude
   draft a review comment you then edit. Claude can read the whole checkout
   but can't change files, run commands or post anything.
+- **Find where a name is defined and used.** Ctrl+click (Cmd+click on a Mac)
+  a name in the code. A window opens under the line with the definition on
+  the left and a list of uses on the right. Ctrl+click a name inside the
+  window to follow it further, and go back with the arrow in its header.
+  Double-click a place to open its whole file; the Back button (or your
+  browser's) returns to the diff where you were. Go answers are exact when
+  `gopls` is installed; other languages are found by name, so a result may
+  include other functions with the same name.
+- **Summaries.** Claude (Sonnet) writes a short summary of each changed file
+  in the background; it shows under the file's name. A Summarize button on
+  each function or section, or on the lines you select, explains just that
+  part and what the PR changed in it. The Summary view (the third button, next
+  to Unified and Split) lists each section's summary beside its code, shown
+  as "diff" or "new only". Nothing is added to the PR description.
 
 You can also do a normal review: comment on lines or ranges, suggest changes,
 reply, resolve, mark files Viewed (shared with github.com), and submit as
@@ -49,6 +63,7 @@ Needs `gh` (logged in), `git`, and `claude` for the Claude parts. Set
 - `~/.cache/prview/worktrees/`: a checkout per PR, for Claude to read.
 - `~/.cache/prview/orders/`, `chats/`: saved reading orders and Claude
   conversations.
+- `~/.cache/prview/summaries/`: saved file and section summaries.
 
 ## Build
 

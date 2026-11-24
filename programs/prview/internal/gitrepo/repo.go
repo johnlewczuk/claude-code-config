@@ -7,13 +7,17 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/code"
 	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/diff"
 )
 
@@ -152,7 +156,7 @@ func (r *Repo) PrefetchBlobs(ctx context.Context, base, head string, paths []str
 	if r.URL == "" {
 		return nil
 	}
-	var missing []string
+	var oids []string
 	// Blobs the PR's commits introduced.
 	out, err := r.git(ctx, "rev-list", "--objects", "--missing=print", base+".."+head)
 	if err != nil {
@@ -160,7 +164,7 @@ func (r *Repo) PrefetchBlobs(ctx context.Context, base, head string, paths []str
 	}
 	for _, l := range strings.Split(string(out), "\n") {
 		if strings.HasPrefix(l, "?") {
-			missing = append(missing, strings.TrimPrefix(l, "?"))
+			oids = append(oids, strings.TrimPrefix(l, "?"))
 		}
 	}
 	// The base versions of the changed files.
@@ -170,22 +174,49 @@ func (r *Repo) PrefetchBlobs(ctx context.Context, base, head string, paths []str
 		if err != nil {
 			return err
 		}
-		var oids []string
-		for _, l := range strings.Split(string(out), "\n") {
-			f := strings.Fields(l)
-			if len(f) >= 3 && f[1] == "blob" {
-				oids = append(oids, f[2])
-			}
+		oids = append(oids, blobIDs(out)...)
+	}
+	return r.fetchMissing(ctx, oids)
+}
+
+// PrefetchTree downloads, in one fetch, every file content at rev that the
+// partial clone doesn't have yet, so a search over the whole tree doesn't
+// fetch them one at a time.
+func (r *Repo) PrefetchTree(ctx context.Context, rev string) error {
+	if r.URL == "" {
+		return nil
+	}
+	out, err := r.git(ctx, "ls-tree", "-r", rev)
+	if err != nil {
+		return err
+	}
+	return r.fetchMissing(ctx, blobIDs(out))
+}
+
+// blobIDs picks the file ids out of `git ls-tree` output.
+func blobIDs(lsTree []byte) []string {
+	var oids []string
+	for _, l := range strings.Split(string(lsTree), "\n") {
+		f := strings.Fields(l)
+		if len(f) >= 3 && f[1] == "blob" {
+			oids = append(oids, f[2])
 		}
-		if len(oids) > 0 {
-			cmd := exec.CommandContext(ctx, "git", "-C", r.Dir, "cat-file", "--batch-check=%(objectname)", "--buffer")
-			cmd.Stdin = strings.NewReader(strings.Join(oids, "\n") + "\n")
-			res, _ := cmd.Output() // missing objects print "<oid> missing"
-			for _, l := range strings.Split(string(res), "\n") {
-				if strings.HasSuffix(l, " missing") {
-					missing = append(missing, strings.TrimSuffix(l, " missing"))
-				}
-			}
+	}
+	return oids
+}
+
+// fetchMissing downloads the objects among oids that the repo doesn't have.
+func (r *Repo) fetchMissing(ctx context.Context, oids []string) error {
+	if len(oids) == 0 {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", r.Dir, "cat-file", "--batch-check=%(objectname)", "--buffer")
+	cmd.Stdin = strings.NewReader(strings.Join(oids, "\n") + "\n")
+	res, _ := cmd.Output() // missing objects print "<oid> missing"
+	var missing []string
+	for _, l := range strings.Split(string(res), "\n") {
+		if strings.HasSuffix(l, " missing") {
+			missing = append(missing, strings.TrimSuffix(l, " missing"))
 		}
 	}
 	if len(missing) == 0 {
@@ -193,13 +224,99 @@ func (r *Repo) PrefetchBlobs(ctx context.Context, base, head string, paths []str
 	}
 	full := append([]string{"-C", r.Dir}, r.authArgs()...)
 	full = append(full, "fetch", "--no-tags", "--no-write-fetch-head", "--filter=blob:none", "--stdin", "origin")
-	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd = exec.CommandContext(ctx, "git", full...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	cmd.Stdin = strings.NewReader(strings.Join(missing, "\n") + "\n")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("fetching file contents: %w: %s", err, out)
 	}
 	return nil
+}
+
+// Grep finds the lines of text files at rev that contain name as a whole
+// word, in path order. It returns at most max of them and how many more it
+// left out.
+func (r *Repo) Grep(ctx context.Context, rev, name string, max int) (ms []code.Match, more int, err error) {
+	// -z puts a NUL after the path, line and column, so a path may hold any
+	// character and comes out as it is.
+	full := append([]string{"-C", r.Dir}, r.authArgs()...)
+	full = append(full, "grep", "-z", "-I", "-n", "--column", "-w", "-F", "-e", name, rev, "--")
+	cmd := exec.CommandContext(ctx, "git", full...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, 0, err
+	}
+	rd := bufio.NewReader(stdout)
+	var readErr error
+	for {
+		var line string
+		line, readErr = readLine(rd, maxGrepLine)
+		if readErr != nil {
+			break
+		}
+		m, ok := parseGrepLine(strings.TrimPrefix(line, rev+":"))
+		if !ok {
+			continue
+		}
+		if len(ms) < max {
+			ms = append(ms, m)
+		} else {
+			more++
+		}
+	}
+	if err := cmd.Wait(); err != nil {
+		// Exit status 1 means nothing matched.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 1 && len(ms) == 0 {
+			return nil, 0, nil
+		}
+		return nil, 0, fmt.Errorf("git grep: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	if readErr != io.EOF {
+		return nil, 0, readErr
+	}
+	return ms, more, nil
+}
+
+// maxGrepLine is how much of one grep line is kept. A longer line (a
+// committed minified bundle, say) is cut, not a reason to stop reading.
+const maxGrepLine = 64 * 1024
+
+// readLine reads up to the next newline and returns the line without it,
+// keeping at most limit bytes of it.
+func readLine(r *bufio.Reader, limit int) (string, error) {
+	var line []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		line = append(line, chunk[:min(len(chunk), limit-len(line))]...)
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if err == io.EOF && len(line) > 0 {
+			err = nil
+		}
+		return string(bytes.TrimSuffix(line, []byte("\n"))), err
+	}
+}
+
+// parseGrepLine reads "path\x00line\x00col\x00text".
+func parseGrepLine(s string) (code.Match, bool) {
+	f := strings.SplitN(s, "\x00", 4)
+	if len(f) < 4 {
+		return code.Match{}, false
+	}
+	line, err1 := strconv.Atoi(f[1])
+	col, err2 := strconv.Atoi(f[2])
+	if err1 != nil || err2 != nil {
+		return code.Match{}, false
+	}
+	return code.Match{Path: f[0], Line: line, Col: col, Text: f[3]}, true
 }
 
 // ChangedPaths lists the paths changed between base and head, old and new

@@ -34,6 +34,13 @@ func NewRunner() (*Runner, error) {
 	return &Runner{Bin: bin, Model: os.Getenv("PRVIEW_MODEL"), Instructions: LoadInstructions(filepath.Join(home, ".claude", "CLAUDE.md"))}, nil
 }
 
+// WithModel returns a copy that uses model m.
+func (r *Runner) WithModel(m string) *Runner {
+	c := *r
+	c.Model = m
+	return &c
+}
+
 // LoadInstructions reads a CLAUDE.md, replacing each line that is just
 // "@path" with that file's contents (recursively, once per file).
 func LoadInstructions(path string) string {

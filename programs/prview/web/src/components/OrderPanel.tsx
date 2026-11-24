@@ -14,7 +14,7 @@ interface Props {
 }
 
 export function OrderPanel({ files, order, setOrder, viewedOf, viewedCount, total, currentStep, jumpTo }: Props) {
-  const { api, data, toast, commits } = useReview()
+  const { api, data, toast, commits, sums } = useReview()
   const o = order.order
   const steps = o?.steps ?? []
   const groups = o?.groups ?? []
@@ -33,6 +33,11 @@ export function OrderPanel({ files, order, setOrder, viewedOf, viewedCount, tota
     }
   }
 
+  /** A file's summary, shown when hovering its entry, once it is written. */
+  const summaryOf = (path: string) => {
+    const s = sums.files[realPath(path)]
+    return s?.status === 'ready' ? s.text : undefined
+  }
   const tick = (path: string) => (viewedOf(realPath(path)) === 'VIEWED' ? '✓' : '')
   const pct = total ? Math.round((viewedCount / total) * 100) : 0
 
@@ -60,7 +65,12 @@ export function OrderPanel({ files, order, setOrder, viewedOf, viewedCount, tota
       {order.status === 'failed' && <div class="order-wait error">No reading order: {order.error}</div>}
 
       {steps.map((s, i) => (
-        <button key={i} class={`step ${currentStep === i ? 'cur' : ''}`} onClick={() => jumpTo(s.file, s, i)}>
+        <button
+          key={i}
+          class={`step ${currentStep === i ? 'cur' : ''}`}
+          onClick={() => jumpTo(s.file, s, i)}
+          title={summaryOf(s.file)}
+        >
           <span class="ck">{tick(s.file)}</span>
           <span class="n">{i + 1}</span>
           <span class="step-body">
@@ -79,7 +89,7 @@ export function OrderPanel({ files, order, setOrder, viewedOf, viewedCount, tota
           <span class="step-body">
             <span class="note">{g.note}</span>
             {g.files.map((f) => (
-              <button key={f} class="rest-file" onClick={() => jumpTo(f)}>
+              <button key={f} class="rest-file" onClick={() => jumpTo(f)} title={summaryOf(f)}>
                 <span class="ck">{tick(f) || '·'}</span>
                 <span>{f}</span>
               </button>
@@ -94,7 +104,7 @@ export function OrderPanel({ files, order, setOrder, viewedOf, viewedCount, tota
             <span>{o ? 'The rest' : 'Files'}</span>
           </div>
           {rest.map((f) => (
-            <button key={f.path} class="rest-file" onClick={() => jumpTo(f.path)}>
+            <button key={f.path} class="rest-file" onClick={() => jumpTo(f.path)} title={summaryOf(f.path)}>
               <span class="ck">{tick(f.path) || '·'}</span>
               <span>{f.path}</span>
             </button>

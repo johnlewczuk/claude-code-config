@@ -76,6 +76,7 @@ func serve(args []string) {
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+	s.Close()
 	log.Print("prview stopped")
 }
 

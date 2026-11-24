@@ -1,15 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { ApiError, getJSON, postJSON, prBase, stream } from './api'
 import { ChatPanel, type ChatHandle } from './components/ChatPanel'
 import { CommitTip } from './components/CommitTip'
 import { Description } from './components/Description'
+import { FileFull } from './components/FileFull'
 import { FileView } from './components/FileView'
 import { OrderPanel } from './components/OrderPanel'
+import { usePeek } from './peek'
+import { useSummaries } from './summaries'
 import { SubmitDialog } from './components/SubmitDialog'
 import { TopBar } from './components/TopBar'
 import { formKey, ReviewCtx, type ReviewApi, type View } from './ctx'
+import { hashToSpot, spotToHash } from './nav'
+import type { CodeMode } from './svblocks'
 import { fileLines, stepTarget, type Range } from './rows'
-import type { DiffFile, GHFile, LoadPayload, OrderState, Step, Thread, ThreadsPayload } from './types'
+import type { DiffFile, GHFile, LoadPayload, OrderState, Spot, Step, Thread, ThreadsPayload } from './types'
 import { commitIndex, loadPref, savePref, type CommitInfo } from './util'
 
 interface Props {
@@ -31,6 +36,7 @@ export function Review({ owner, repo, number }: Props) {
   const [order, setOrder] = useState<OrderState>({ status: 'none' })
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [view, setView] = useState<View>(loadPref<View>('view', 'unified'))
+  const [codeMode, setCodeMode] = useState<CodeMode>(loadPref<CodeMode>('svcode', 'diff'))
   const [chatOpen, setChatOpen] = useState(loadPref('chat', 'open') === 'open')
   const [moved, setMoved] = useState(false)
   const [submitOpen, setSubmitOpen] = useState(false)
@@ -45,12 +51,43 @@ export function Review({ owner, repo, number }: Props) {
   const [tip, setTip] = useState<{ info: CommitInfo; rect: DOMRect } | null>(null)
   const tipTimer = useRef<number>()
   const chat = useRef<ChatHandle>(null)
+  const peekState = usePeek(api)
+  const { closePeek } = peekState
+  const mid = useRef<HTMLElement>(null)
+  // The places opened as whole files, oldest first; the last is on show. Empty: the diff.
+  const [trail, setTrail] = useState<Spot[]>([])
+  const spot = trail[trail.length - 1] ?? null
+  const trailNow = useRef(trail)
+  trailNow.current = trail
+  // What to do once the diff is showing again after Back.
+  const afterBack = useRef<{ scroll?: number; then?: () => void } | null>(null)
+  // The head the page shows; a reload that brings a new one drops what was shown of the old.
+  const shownHead = useRef<string | null>(null)
 
   const toast = useCallback((msg: string) => {
     const id = Date.now() + Math.random()
     setToasts((t) => [...t, { id, msg }])
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 6000)
   }, [])
+
+  const sumState = useSummaries(api, data, toast)
+  const { closeNote } = sumState
+  // Esc closes the most recently opened note that is on screen, unless the peek (which takes Esc itself) is open.
+  const escNow = useRef({ peekOpen: false, notes: sumState.notes })
+  escNow.current = { peekOpen: !!peekState.peek, notes: sumState.notes }
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || escNow.current.peekOpen || typing(e.target)) return
+      // A note in a hidden file, or in the diff behind the whole-file view, has no box on screen.
+      const shown = new Set<string>()
+      for (const el of document.querySelectorAll<HTMLElement>('.snote[data-note]'))
+        if (el.getClientRects().length > 0) shown.add(el.dataset.note!)
+      const last = [...escNow.current.notes.keys()].filter((k) => shown.has(k)).pop()
+      if (last) closeNote(last)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [closeNote])
 
   // Load (and reload) the PR, streaming progress.
   const load = useCallback(async () => {
@@ -63,6 +100,12 @@ export function Review({ owner, repo, number }: Props) {
         else if (event === 'failed') failed = d.error
         else if (event === 'ready') {
           const p = d as LoadPayload
+          if (shownHead.current && shownHead.current !== p.head) {
+            // Places in the peek and the whole-file view are line numbers of the old head.
+            closePeek()
+            if (trailNow.current.length) history.go(-trailNow.current.length)
+          }
+          shownHead.current = p.head
           setData(p)
           setThreads(p.pr.threads ?? [])
           setGhFiles(p.pr.files ?? [])
@@ -78,11 +121,45 @@ export function Review({ owner, repo, number }: Props) {
       failed = String(e instanceof Error ? e.message : e)
     }
     if (failed) setLoadError(failed)
-  }, [api])
+  }, [api, closePeek])
 
   useEffect(() => {
     load()
   }, [load])
+
+  // Back, forward and a reload with a place in the address: the history entry says which trail is on show.
+  useEffect(() => {
+    const saved: Spot[] | undefined = history.state?.trail
+    const first = hashToSpot(location.hash)
+    if (saved?.length) {
+      // The page was reloaded on a whole file: history already holds the trail, with the diff beneath.
+      setTrail(saved)
+    } else if (first) {
+      // Put the diff underneath, so Back leaves the place for the diff first.
+      history.replaceState({ trail: [] }, '', location.pathname + location.search)
+      history.pushState({ trail: [first] }, '', location.pathname + location.search + spotToHash(first))
+      setTrail([first])
+    }
+    const onPop = (e: PopStateEvent) => {
+      const fromHash = hashToSpot(location.hash)
+      const t: Spot[] = e.state?.trail ?? (fromHash ? [fromHash] : [])
+      afterBack.current = t.length === 0 ? { scroll: e.state?.scroll, then: afterBack.current?.then } : null
+      closePeek()
+      setTrail(t)
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [closePeek])
+
+  // Back at the diff: put the scroll where it was, or carry on to the jump that asked for the diff.
+  useLayoutEffect(() => {
+    const a = afterBack.current
+    if (spot || !a) return
+    afterBack.current = null
+    const scroller = scrollerOf(mid.current)
+    if (a.then) a.then()
+    else if (a.scroll !== undefined && scroller) scroller.scrollTop = a.scroll
+  }, [spot])
 
   // Poll for the reading order while Claude writes it.
   useEffect(() => {
@@ -148,6 +225,11 @@ export function Review({ owner, repo, number }: Props) {
     commits,
     threads,
     view,
+    codeMode,
+    setCodeMode(m) {
+      setCodeMode(m)
+      savePref('svcode', m)
+    },
     selection,
     select(path, ref, extend) {
       if (extend && anchor.current && selection?.path === path) {
@@ -155,7 +237,13 @@ export function Review({ owner, repo, number }: Props) {
         setSelection(a.idx <= ref.idx ? { path, start: a, end: ref } : { path, start: ref, end: a })
         return
       }
-      if (selection && selection.path === path && selection.start.idx === ref.idx && selection.end.idx === ref.idx && selection.start.side === ref.side) {
+      if (
+        selection &&
+        selection.path === path &&
+        selection.start.idx === ref.idx &&
+        selection.end.idx === ref.idx &&
+        selection.start.side === ref.side
+      ) {
         setSelection(null)
         anchor.current = null
         return
@@ -226,6 +314,16 @@ export function Review({ owner, repo, number }: Props) {
       }
       return result
     },
+    ...peekState,
+    ...sumState,
+    openFully(s) {
+      // Remember where the diff was scrolled to, so Back lands there.
+      if (!trailNow.current.length) history.replaceState({ trail: [], scroll: scrollerOf(mid.current)?.scrollTop }, '')
+      const next = [...trailNow.current, s]
+      history.pushState({ trail: next }, '', location.pathname + location.search + spotToHash(s))
+      closePeek()
+      setTrail(next)
+    },
     toast,
   }
 
@@ -285,6 +383,14 @@ export function Review({ owner, repo, number }: Props) {
     })
 
   const jumpTo = (path: string, step?: Step, stepIndex?: number) => {
+    if (!spot) return showInDiff(path, step, stepIndex)
+    // Go back to the diff first, then jump once it is showing.
+    afterBack.current = { then: () => showInDiff(path, step, stepIndex) }
+    history.go(-trail.length)
+  }
+
+  /** Scrolls the diff to a file, or to a reading-order step in it, and flashes it. */
+  const showInDiff = (path: string, step?: Step, stepIndex?: number) => {
     if (stepIndex !== undefined) setCurrentStep(stepIndex)
     const fi = files.findIndex((f) => f.path === path || f.oldPath === path)
     if (fi < 0) return
@@ -299,7 +405,10 @@ export function Review({ owner, repo, number }: Props) {
       }
       el ??= document.getElementById(`file-${fi}`)
       if (!el) return
-      el.scrollIntoView({ block: el.id ? 'start' : 'center', behavior: 'smooth' })
+      el.scrollIntoView({
+        block: el.id ? 'start' : 'center',
+        behavior: 'smooth',
+      })
       el.classList.remove('flash')
       void (el as HTMLElement).offsetWidth
       el.classList.add('flash')
@@ -344,20 +453,28 @@ export function Review({ owner, repo, number }: Props) {
             currentStep={currentStep}
             jumpTo={jumpTo}
           />
-          <main class="mid">
-            <Description />
-            {ordered.map(({ file, index }) => (
-              <FileView
-                key={file.path}
-                file={file}
-                index={index}
-                viewed={viewedOf(file.path)}
-                collapsed={collapsed.has(file.path)}
-                toggleCollapsed={() => toggleCollapsed(file.path)}
-                setViewed={(v) => setViewed(file.path, v)}
-              />
-            ))}
-            {files.length === 0 && <div class="empty">This PR changes no files.</div>}
+          <main class="mid" ref={mid}>
+            {spot && <FileFull spot={spot} trail={trail} />}
+            <div hidden={!!spot}>
+              <Description />
+              {sumState.sums.off && (
+                <div class="fsum meta" title={sumState.sums.off}>
+                  Summaries need the claude command
+                </div>
+              )}
+              {ordered.map(({ file, index }) => (
+                <FileView
+                  key={file.path}
+                  file={file}
+                  index={index}
+                  viewed={viewedOf(file.path)}
+                  collapsed={collapsed.has(file.path)}
+                  toggleCollapsed={() => toggleCollapsed(file.path)}
+                  setViewed={(v) => setViewed(file.path, v)}
+                />
+              ))}
+              {files.length === 0 && <div class="empty">This PR changes no files.</div>}
+            </div>
           </main>
           {chatOpen && data.claude && <ChatPanel ref={chat} />}
         </div>
@@ -373,7 +490,9 @@ export function Review({ owner, repo, number }: Props) {
             onMoved={() => setMoved(true)}
           />
         )}
-        {tip && <CommitTip info={tip.info} rect={tip.rect} keep={() => clearTimeout(tipTimer.current)} leave={() => reviewApi!.hideTip()} />}
+        {tip && (
+          <CommitTip info={tip.info} rect={tip.rect} keep={() => clearTimeout(tipTimer.current)} leave={() => reviewApi!.hideTip()} />
+        )}
         <div class="toasts">
           {toasts.map((t) => (
             <div key={t.id} class="toast">
@@ -384,6 +503,20 @@ export function Review({ owner, repo, number }: Props) {
       </div>
     </ReviewCtx.Provider>
   )
+}
+
+/** Whether a key went to a text field, where Esc belongs to the field. */
+function typing(t: EventTarget | null): boolean {
+  return t instanceof HTMLElement && (t.isContentEditable || t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')
+}
+
+/** The element that scrolls the middle pane: the pane itself, or the whole body in the narrow layout. */
+function scrollerOf(el: HTMLElement | null): HTMLElement | null {
+  for (let e = el; e; e = e.parentElement) {
+    const overflow = getComputedStyle(e).overflowY
+    if (overflow === 'auto' || overflow === 'scroll') return e
+  }
+  return document.scrollingElement as HTMLElement | null
 }
 
 /** Files in reading order: steps first, then groups, then the rest in path order. */
@@ -405,5 +538,4 @@ function orderFiles(files: DiffFile[], order: OrderState): { file: DiffFile; ind
     }
   return indexed.sort((a, b) => (rank.get(a.index) ?? 1e9 + a.index) - (rank.get(b.index) ?? 1e9 + b.index))
 }
-
 

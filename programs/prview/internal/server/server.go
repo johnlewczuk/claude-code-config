@@ -12,14 +12,19 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/claude"
 	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/github"
 	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/gitrepo"
+	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/gopls"
+	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/summary"
 )
 
 //go:embed all:dist
@@ -51,6 +56,18 @@ type Server struct {
 
 	stop func() // shuts the server down; set by the caller that runs it
 
+	gopls *gopls.Pool // nil when gopls isn't installed
+
+	// summarize asks Claude (model sonnet, no tools) for a summary; nil when
+	// claude isn't installed. Tests replace it.
+	summarize func(ctx context.Context, system, prompt string) (string, error)
+	store     summary.Store // saved summaries
+	asks      chan struct{} // a place for each summary the user asked for that is running
+
+	// checkout puts the loaded head in a folder and returns the folder and
+	// the head. It is s.worktree except in tests.
+	checkout func(*http.Request, *prState) (dir, head string, err error)
+
 	mu    sync.Mutex
 	prs   map[string]*prState
 	repos map[string]*gitrepo.Repo
@@ -61,8 +78,24 @@ func (s *Server) OnStop(f func()) { s.stop = f }
 
 // New makes a server. claudeRunner may be nil.
 func New(gh GitHub, claudeRunner *claude.Runner, cacheDir, key string) *Server {
-	return &Server{gh: gh, claude: claudeRunner, cache: cacheDir, key: key,
-		prs: map[string]*prState{}, repos: map[string]*gitrepo.Repo{}}
+	s := &Server{gh: gh, claude: claudeRunner, cache: cacheDir, key: key,
+		prs: map[string]*prState{}, repos: map[string]*gitrepo.Repo{}, asks: make(chan struct{}, askWorkers)}
+	s.checkout = s.worktree
+	s.store = summary.Store{Dir: filepath.Join(cacheDir, "summaries")}
+	s.setSummarize()
+	if bin, err := exec.LookPath("gopls"); err == nil {
+		s.gopls = gopls.NewPool(s.startGopls(bin), 10*time.Minute, 2)
+	} else {
+		log.Printf("exact Go lookups off: %v", err)
+	}
+	return s
+}
+
+// Close stops the programs the server started.
+func (s *Server) Close() {
+	if s.gopls != nil {
+		s.gopls.Close()
+	}
 }
 
 // CookieName holds the access key in the browser (and in `prview stop`).
@@ -95,9 +128,14 @@ func (s *Server) Handler() http.Handler {
 	api("GET /load", s.handleLoad)
 	api("GET /head", s.handleHead)
 	api("GET /lines", s.handleLines)
+	api("GET /refs", s.handleRefs)
 	api("GET /threads", s.handleThreads)
 	api("GET /order", s.handleOrder)
 	api("POST /order/redo", s.handleOrderRedo)
+	api("GET /summaries", s.handleSummaries)
+	api("POST /summaries/redo", s.handleSummariesRedo)
+	api("GET /sections", s.handleSections)
+	api("POST /summary/section", s.handleSectionSummary)
 	api("POST /viewed", s.handleViewed)
 	api("POST /comment", s.handleComment)
 	api("POST /reply", s.handleReply)

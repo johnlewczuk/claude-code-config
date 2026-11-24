@@ -39,6 +39,9 @@ export function TopBar({ pendingCount, hasPending, view, setView, chatOpen, togg
         <button class={view === 'split' ? 'on' : ''} onClick={() => setView('split')}>
           Split
         </button>
+        <button class={view === 'summary' ? 'on' : ''} onClick={() => setView('summary')} title="Summaries in a pane beside the code">
+          Summary
+        </button>
       </div>
       {data.claude && (
         <button class={`btn ${chatOpen ? 'on' : ''}`} onClick={toggleChat} title="Show or hide the Claude panel">

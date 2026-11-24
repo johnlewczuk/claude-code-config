@@ -2,7 +2,7 @@ import type { ComponentChildren } from 'preact'
 import { useMemo, useState } from 'preact/hooks'
 import { getJSON } from '../api'
 import { formKey, useReview } from '../ctx'
-import { highlightLine, languageFor } from '../highlight'
+import { languageFor } from '../highlight'
 import {
   fileLines,
   inRange,
@@ -17,9 +17,17 @@ import {
   type Expansion,
   type Gap,
   type Range,
+  type Row,
 } from '../rows'
-import type { DiffFile, LineRef, Side, Thread } from '../types'
+import type { PeekAnchor } from '../peek'
+import { noteKey, noteRows, sectionButtons, sectionReq, summarizable, useSections } from '../summaries'
+import type { DiffFile, LineRef, Note, Section, Side, Thread } from '../types'
+import { markdown } from '../util'
 import { CommentForm } from './CommentForm'
+import { Chip, Code, codeClick, noSelectWithCtrl } from './Code'
+import { Peek } from './Peek'
+import { SummarizeButton, SummaryNote } from './SummaryNote'
+import { SummaryView } from './SummaryView'
 import { ThreadView } from './ThreadView'
 
 interface Props {
@@ -32,6 +40,18 @@ interface Props {
 }
 
 const STEP = 20
+
+/** A row of the diff: a line, or the gap row of hidden lines. */
+type Item = DLine | Gap
+
+/** A file's Summarize buttons and open notes, by the row they go on. */
+interface SumMarks {
+  /** The side the sections were read from: the new side, or the old for a deleted file. */
+  side: 'new' | 'old'
+  buttons: Map<Item, Section>
+  notes: Map<Item, Note[]>
+  open(s: Section): void
+}
 
 export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setViewed }: Props) {
   const rv = useReview()
@@ -56,13 +76,40 @@ export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setV
   }, [rv.threads, lines, file.path])
 
   const rows = useMemo(() => unifiedRows(file, lines, exp, source), [file, lines, exp, source])
+  const binary = file.binary || !file.hunks?.length
+  const [sumHidden, setSumHidden] = useState(false)
+
+  // Summaries: none until the page knows them, and never when they are off or the file is skipped.
+  const fsum = rv.sums.files[file.path]
+  const side = file.status === 'deleted' ? 'old' : 'new'
+  const sidePath = side === 'old' ? file.oldPath : file.path
+  const sections = useSections(rv.loadSections, sidePath, side, summarizable(fsum) && !collapsed && !binary)
+  const { notes, openNote } = rv
+  const summaryView = rv.view === 'summary'
+  const marks = useMemo((): SumMarks => {
+    const fileNotes = [...notes.values()].filter((n) => n.req.path === (n.req.side === 'old' ? file.oldPath : file.path))
+    // The Summary view shows the buttons and the sections' notes in its left pane; only other notes stay in the code.
+    const sectionNote = (n: Note) => n.req.side === side && !!sections?.some((s) => s.start === n.req.start && s.end === n.req.end)
+    const inline = summaryView ? fileNotes.filter((n) => !sectionNote(n)) : fileNotes
+    const buttons = sections && !summaryView ? sectionButtons(rows, sections, side) : new Map<number, Section>()
+    const item = (i: number): Item => {
+      const r = rows[i]
+      return r.t === 'gap' ? r.gap : r.line
+    }
+    const byItem = <T,>(m: Map<number, T>) => new Map([...m].map(([i, v]) => [item(i), v]))
+    return {
+      side,
+      buttons: byItem(buttons),
+      notes: byItem(noteRows(rows, buttons, side, inline)),
+      open: (s) => openNote(sectionReq(sidePath, side, s)),
+    }
+  }, [rows, sections, side, sidePath, notes, openNote, file, summaryView])
 
   const expand = async (gap: Gap, dir: 'down' | 'up' | 'all') => {
     let src = source
     if (!src) {
       try {
-        const side = file.status === 'deleted' ? 'old' : 'new'
-        const r = await getJSON<{ lines: string[] }>(`${rv.api}/lines?side=${side}&path=${encodeURIComponent(file.status === 'deleted' ? file.oldPath : file.path)}`)
+        const r = await getJSON<{ lines: string[] }>(`${rv.api}/lines?side=${side}&path=${encodeURIComponent(sidePath)}`)
         src = r.lines
         setSource(src)
       } catch (e) {
@@ -82,7 +129,8 @@ export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setV
   }
 
   const threadCount = rv.threads.filter((t) => t.path === file.path).length
-  const binary = file.binary || !file.hunks?.length
+  const summary = !sumHidden && <FileSummary path={file.path} hide={() => setSumHidden(true)} />
+  const table = { file, index, lines, lang, byKey, marks, expand }
 
   return (
     <section class="file" id={`file-${index}`}>
@@ -103,6 +151,11 @@ export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setV
         {threadCount > 0 && <span class="meta">💬 {threadCount}</span>}
         <span class="sp" />
         <span class="add-n">+{file.additions}</span> <span class="del-n">−{file.deletions}</span>
+        {sumHidden && fsum && !collapsed && (
+          <button class="linkish" onClick={() => setSumHidden(false)} title="Show this file's summary">
+            ⌄ summary
+          </button>
+        )}
         {viewed === 'DISMISSED' && <span class="tag warn">changed since viewed</span>}
         <label class="viewed">
           <input type="checkbox" checked={viewed === 'VIEWED'} onChange={(e) => setViewed((e.target as HTMLInputElement).checked)} /> Viewed
@@ -110,13 +163,24 @@ export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setV
       </div>
       {!collapsed && (
         <>
+          {(!summaryView || binary) && summary}
           {loose.length > 0 && <LooseThreads threads={loose} />}
           {binary ? (
             <div class="empty">{file.binary ? 'Binary file not shown.' : 'No text changes (mode or rename only).'}</div>
+          ) : summaryView ? (
+            <SummaryView
+              rows={rows}
+              sections={sections}
+              side={side}
+              sidePath={sidePath}
+              open={marks.open}
+              summary={summary}
+              code={(part) => <UnifiedTable {...table} rows={part} />}
+            />
           ) : rv.view === 'split' ? (
-            <SplitTable file={file} index={index} rows={rows} lines={lines} lang={lang} byKey={byKey} expand={expand} />
+            <SplitTable {...table} rows={rows} />
           ) : (
-            <UnifiedTable file={file} index={index} rows={rows} lines={lines} lang={lang} byKey={byKey} expand={expand} />
+            <UnifiedTable {...table} rows={rows} />
           )}
         </>
       )}
@@ -127,19 +191,22 @@ export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setV
 interface TableProps {
   file: DiffFile
   index: number
-  rows: ReturnType<typeof unifiedRows>
+  rows: Row[]
   lines: DLine[]
   lang: string | null
   byKey: Map<string, Thread[]>
+  marks: SumMarks
   expand(gap: Gap, dir: 'down' | 'up' | 'all'): void
 }
 
-function UnifiedTable({ file, index, rows, lines, lang, byKey, expand }: TableProps) {
+/** The unified diff of `rows`: all of a file's rows, or one block of the Summary view. */
+function UnifiedTable({ file, index, rows, lines, lang, byKey, marks, expand }: TableProps) {
   const rv = useReview()
   const out: ComponentChildren[] = []
   rows.forEach((r, i) => {
     if (r.t === 'gap') {
-      out.push(<GapRow key={'g' + i} gap={r.gap} cols={4} expand={expand} />)
+      out.push(<GapRow key={'g' + i} gap={r.gap} cols={4} expand={expand} button={sectionButton(marks, r.gap)} />)
+      out.push(...summaryRows(marks.notes.get(r.gap), 4))
       return
     }
     const l = r.line
@@ -162,12 +229,17 @@ function UnifiedTable({ file, index, rows, lines, lang, byKey, expand }: TablePr
         <td class={`ln ${ref ? 'click' : ''}`} onClick={click}>
           {l.new ?? ''}
         </td>
-        <td class="code">
+        <td
+          class="code"
+          onMouseDown={noSelectWithCtrl}
+          onClick={(e) => ctrlClick(rv, file, index, lang, e, l, l.kind === 'del' ? 'old' : 'new')}
+        >
+          {sectionButton(marks, l)}
           <Code line={l} lang={lang} />
         </td>
       </tr>,
     )
-    out.push(...extras(rv, file, lines, l, keysForLine(l), byKey, 4, i))
+    out.push(...extras(rv, file, index, lines, l, keysForLine(l), byKey, 4, i, marks.notes.get(l)))
   })
   return (
     <table class="diff unified">
@@ -182,12 +254,15 @@ function UnifiedTable({ file, index, rows, lines, lang, byKey, expand }: TablePr
   )
 }
 
-function SplitTable({ file, index, rows, lines, lang, byKey, expand }: TableProps) {
+function SplitTable({ file, index, rows, lines, lang, byKey, marks, expand }: TableProps) {
   const rv = useReview()
   const out: ComponentChildren[] = []
+  // The side whose code cells carry the Summarize buttons.
+  const buttonSide: Side = marks.side === 'old' ? 'LEFT' : 'RIGHT'
   splitRows(rows).forEach((r, i) => {
     if (r.t === 'gap') {
-      out.push(<GapRow key={'g' + i} gap={r.gap} cols={6} expand={expand} />)
+      out.push(<GapRow key={'g' + i} gap={r.gap} cols={6} expand={expand} button={sectionButton(marks, r.gap)} />)
+      out.push(...summaryRows(marks.notes.get(r.gap), 6))
       return
     }
     const half = (l: DLine | null, side: Side) => {
@@ -207,7 +282,12 @@ function SplitTable({ file, index, rows, lines, lang, byKey, expand }: TableProp
         >
           {n ?? ''}
         </td>,
-        <td class={`code ${kind} ${sel ? 'sel' : ''} ${l.idx < 0 ? 'more' : ''}`}>
+        <td
+          class={`code ${kind} ${sel ? 'sel' : ''} ${l.idx < 0 ? 'more' : ''}`}
+          onMouseDown={noSelectWithCtrl}
+          onClick={(e) => ctrlClick(rv, file, index, lang, e, l, l.kind === 'del' ? 'old' : 'new')}
+        >
+          {side === buttonSide && sectionButton(marks, l)}
           <Code line={l} lang={lang} />
         </td>,
       ]
@@ -220,7 +300,8 @@ function SplitTable({ file, index, rows, lines, lang, byKey, expand }: TableProp
     )
     const keys = [...(r.left ? keysForLine(r.left, 'LEFT') : []), ...(r.right ? keysForLine(r.right, 'RIGHT') : [])]
     const anchor = r.right ?? r.left!
-    out.push(...extras(rv, file, lines, anchor, [...new Set(keys)], byKey, 6, i, r.left))
+    const notes = [...(r.right ? marks.notes.get(r.right) ?? [] : []), ...(r.left && r.left !== r.right ? marks.notes.get(r.left) ?? [] : [])]
+    out.push(...extras(rv, file, index, lines, anchor, [...new Set(keys)], byKey, 6, i, notes, r.left))
   })
   return (
     <table class="diff split">
@@ -238,18 +319,20 @@ function SplitTable({ file, index, rows, lines, lang, byKey, expand }: TableProp
 }
 
 /**
- * The rows that follow a line: its threads, the selection's action bar, and
- * any open comment form that ends on it.
+ * The rows that follow a line: its threads, the peek, its summary notes, the
+ * selection's action bar, and any open comment form that ends on it.
  */
 function extras(
   rv: ReturnType<typeof useReview>,
   file: DiffFile,
+  index: number,
   lines: DLine[],
   l: DLine,
   keys: string[],
   byKey: Map<string, Thread[]>,
   cols: number,
   i: number,
+  notes: Note[] | undefined,
   other?: DLine | null,
 ): ComponentChildren[] {
   const out: ComponentChildren[] = []
@@ -266,6 +349,15 @@ function extras(
         </tr>,
       )
     }
+  if (peekHangsHere(rv.peek?.anchor, index, l, other))
+    out.push(
+      <tr key="peek" class="peek-row">
+        <td colSpan={cols}>
+          <Peek />
+        </td>
+      </tr>,
+    )
+  out.push(...summaryRows(notes, cols))
   const endsHere = (r: Range | null) =>
     !!r && r.path === file.path && l.idx >= 0 && (r.end.idx === l.idx || (other != null && other.idx === r.end.idx))
   const sel = rv.selection
@@ -273,7 +365,7 @@ function extras(
     out.push(
       <tr key={'a' + i} class="thread-row">
         <td colSpan={cols}>
-          <SelectionBar range={sel!} lines={lines} />
+          <SelectionBar file={file} range={sel!} lines={lines} />
         </td>
       </tr>,
     )
@@ -290,14 +382,96 @@ function extras(
   return out
 }
 
-function SelectionBar({ range, lines }: { range: Range; lines: DLine[] }) {
+/** Ctrl+click on a name in the diff opens the peek window under its line. */
+function ctrlClick(
+  rv: ReturnType<typeof useReview>,
+  file: DiffFile,
+  index: number,
+  lang: string | null,
+  e: MouseEvent,
+  l: DLine,
+  side: 'new' | 'old',
+) {
+  const target = codeClick(e, l.text, lang)
+  const line = side === 'old' ? l.old : l.new
+  if (!target || !line) return
+  rv.openPeek(
+    { fileIndex: index, idx: l.idx, line: l.idx < 0 ? line : undefined },
+    { ...target, path: side === 'old' ? file.oldPath : file.path, side, line },
+  )
+}
+
+function peekHangsHere(a: PeekAnchor | undefined, index: number, l: DLine, other?: DLine | null) {
+  if (!a || 'full' in a || a.fileIndex !== index) return false
+  const same = (x: DLine) => (x.idx >= 0 ? x.idx === a.idx : a.line !== undefined && (x.new ?? x.old) === a.line)
+  return same(l) || (!!other && same(other))
+}
+
+/** The ▸ Summarize button of the section that starts on this row, if one does. */
+function sectionButton(marks: SumMarks, at: Item) {
+  const s = marks.buttons.get(at)
+  return s ? <SummarizeButton section={s} open={marks.open} /> : null
+}
+
+/** Rows holding summary notes, under the row they belong to. */
+function summaryRows(notes: Note[] | undefined, cols: number): ComponentChildren[] {
+  return (notes ?? []).map((n) => (
+    <tr key={'n' + noteKey(n.req)} class="note-row">
+      <td colSpan={cols}>
+        <SummaryNote note={n} />
+      </td>
+    </tr>
+  ))
+}
+
+/** The file's summary, under its name bar. */
+function FileSummary({ path, hide }: { path: string; hide(): void }) {
+  const rv = useReview()
+  const s = rv.sums.files[path]
+  if (!s) return null
+  return (
+    <div class="fsum">
+      <div class="fsum-text">
+        {s.status === 'ready' ? (
+          <div class="md" dangerouslySetInnerHTML={{ __html: markdown(s.text) }} />
+        ) : s.status === 'skipped' ? (
+          <span class="meta">Skipped: {s.text}</span>
+        ) : s.status === 'failed' ? (
+          <span class="error">
+            Could not summarize: {s.error}{' '}
+            <button class="linkish" onClick={() => rv.redoSum(path)}>
+              Retry
+            </button>
+          </span>
+        ) : (
+          <span class="meta">Summarizing…</span>
+        )}
+      </div>
+      <span class="fsum-btns">
+        {s.status === 'ready' && (
+          <button class="linkish" onClick={() => rv.redoSum(path)} title="Ask Claude to write this summary again">
+            ↻ redo
+          </button>
+        )}
+        <button class="linkish" onClick={hide} title="Hide this summary until the page is reloaded">
+          ⌃ hide
+        </button>
+      </span>
+    </div>
+  )
+}
+
+function SelectionBar({ file, range, lines }: { file: DiffFile; range: Range; lines: DLine[] }) {
   const rv = useReview()
   const n = range.end.idx - range.start.idx + 1
+  const summarize = () => {
+    const s = rangeSelection(range, lines)
+    rv.openNote({ ...s, path: s.side === 'old' ? file.oldPath : file.path, name: '' })
+    rv.clearSelection()
+  }
   return (
     <div class="selbar">
-      <span class="meta">
-        {n === 1 ? `Line ${range.end.line}` : `${n} lines`} selected · shift-click another line to select a range
-      </span>
+      <span class="meta">{n === 1 ? `Line ${range.end.line}` : `${n} lines`} selected · shift-click another line to select a range</span>
       <span class="sp" />
       <button class="btn green" onClick={() => rv.openForm(range)}>
         Comment
@@ -305,6 +479,11 @@ function SelectionBar({ range, lines }: { range: Range; lines: DLine[] }) {
       {rv.data.claude && (
         <button class="btn" onClick={() => rv.askClaude(rangeSelection(range, lines))}>
           ✦ Ask Claude
+        </button>
+      )}
+      {summarizable(rv.sums.files[file.path]) && (
+        <button class="btn" onClick={summarize} title="Ask Claude what these lines do and what this PR changed in them">
+          Summarize
         </button>
       )}
       <button class="btn" onClick={rv.clearSelection}>
@@ -318,7 +497,8 @@ function NewComment({ range, lines }: { range: Range; lines: DLine[] }) {
   const rv = useReview()
   const key = formKey(range)
   const covered = lines.slice(range.start.idx, range.end.idx + 1)
-  const suggestion = range.end.side === 'RIGHT' && range.start.side === 'RIGHT' ? covered.filter((l) => l.kind !== 'del').map((l) => l.text) : null
+  const suggestion =
+    range.end.side === 'RIGHT' && range.start.side === 'RIGHT' ? covered.filter((l) => l.kind !== 'del').map((l) => l.text) : null
   const label =
     range.start.idx === range.end.idx
       ? `Comment on line ${range.end.side === 'LEFT' ? 'L' : 'R'}${range.end.line}`
@@ -345,7 +525,15 @@ function NewComment({ range, lines }: { range: Range; lines: DLine[] }) {
   )
 }
 
-function GapRow({ gap, cols, expand }: { gap: Gap; cols: number; expand(g: Gap, d: 'down' | 'up' | 'all'): void }) {
+interface GapProps {
+  gap: Gap
+  cols: number
+  expand(g: Gap, d: 'down' | 'up' | 'all'): void
+  /** A section's Summarize button, when the section starts in the hidden lines. */
+  button: ComponentChildren
+}
+
+function GapRow({ gap, cols, expand, button }: GapProps) {
   const size = gap.end === Infinity ? Infinity : gap.end - gap.start + 1
   const small = size <= STEP * 2
   return (
@@ -377,35 +565,9 @@ function GapRow({ gap, cols, expand }: { gap: Gap; cols: number; expand(g: Gap, 
           )}
         </span>
         <span class="gap-header">{gap.header ? `@@ ${gap.header}` : ''}</span>
+        {button}
       </td>
     </tr>
-  )
-}
-
-function Chip({ commit }: { commit?: string }) {
-  const rv = useReview()
-  if (!commit) return null
-  const info = rv.commits.get(commit)
-  if (!info) return <span class="chip unknown">{commit.slice(0, 7)}</span>
-  return (
-    <span
-      class="chip"
-      style={{ background: info.color }}
-      onMouseEnter={(e) => rv.showTip(info, e.currentTarget as HTMLElement)}
-      onMouseLeave={rv.hideTip}
-    >
-      {info.index}/{info.total}
-    </span>
-  )
-}
-
-function Code({ line, lang }: { line: DLine; lang: string | null }) {
-  const mark = line.kind === 'add' ? '+' : line.kind === 'del' ? '−' : ' '
-  return (
-    <>
-      <span class="mark">{mark}</span>
-      <span class="src" dangerouslySetInnerHTML={{ __html: highlightLine(line.text, lang) }} />
-    </>
   )
 }
 
@@ -414,7 +576,8 @@ function LooseThreads({ threads }: { threads: Thread[] }) {
   return (
     <div class="loose">
       <button class="loose-head" onClick={() => setOpen(!open)}>
-        {open ? '▾' : '▸'} {threads.length} outdated thread{threads.length === 1 ? '' : 's'} (the code they were written on has changed)
+        {open ? '▾' : '▸'} {threads.length} outdated thread
+        {threads.length === 1 ? '' : 's'} (the code they were written on has changed)
       </button>
       {open &&
         threads.map((t) => (
