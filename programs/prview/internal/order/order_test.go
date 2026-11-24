@@ -9,7 +9,8 @@ func TestFromDescription(t *testing.T) {
 		"   and stored per item\n" +
 		"3. jobs/retry.go:backoff - new helper, check the cap\n" +
 		"4. `jobs/retry_test.go` — tests for the backoff\n" +
-		"5. `src/camera_chain.cpp:CameraChain::Build` — C++ method\n\n" +
+		"5. `src/camera_chain.cpp:CameraChain::Build` — C++ method\n" +
+		"6. `src/decoder.cpp`, then the `WITH_JPEG` block in `CMakeLists.txt`.\n\n" +
 		"Renames of Job to Task are mechanical.\n\n## Testing\n1. not a step.go:x\n"
 	o := FromDescription(body)
 	if o == nil {
@@ -21,6 +22,7 @@ func TestFromDescription(t *testing.T) {
 		{File: "jobs/retry.go", Function: "backoff", Note: "new helper, check the cap"},
 		{File: "jobs/retry_test.go", Function: "", Note: "tests for the backoff"},
 		{File: "src/camera_chain.cpp", Function: "CameraChain::Build", Note: "C++ method"},
+		{File: "src/decoder.cpp", Function: "", Note: "then the `WITH_JPEG` block in `CMakeLists.txt`."},
 	}
 	if len(o.Steps) != len(want) {
 		t.Fatalf("got %d steps: %+v", len(o.Steps), o.Steps)

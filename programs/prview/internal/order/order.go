@@ -101,7 +101,9 @@ func parseItem(text string) (Step, bool) {
 	if !pathRe.MatchString(file) {
 		return Step{}, false
 	}
-	note := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(rest), "*—–-: "))
+	// Drop the separator between the reference and the note: "—", ":",
+	// ", then …", and closing bold.
+	note := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(rest), "*—–-:,; "))
 	return Step{File: file, Function: strings.TrimSpace(fn), Note: note, Side: "new"}, true
 }
 
