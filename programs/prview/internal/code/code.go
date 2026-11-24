@@ -68,54 +68,7 @@ var statementWords = map[string]bool{
 // *Server) Run()" defines Run, not Server, and "const user = getUser(id)"
 // defines user, not getUser.
 func IsDefinition(line, name string) bool {
-	rest := strings.TrimLeft(line, " \t")
-	indented := len(rest) < len(line)
-	skipped := false // a modifier or a definition word came first
-	skip := func(re *regexp.Regexp) []string {
-		m := re.FindStringSubmatch(rest)
-		if m != nil {
-			rest = rest[len(m[0]):]
-			skipped = true
-		}
-		return m
-	}
-	skip(modifiers)
-	if w := skip(defWord); w != nil {
-		skip(receiver)
-		skip(typeParams)
-		skip(modifiers)
-		// func Run, class Foo, let x, #define MAX: the first name.
-		if m := firstName.FindStringSubmatch(rest); m != nil && m[1] == name {
-			return true
-		}
-		if !cTypeWords[w[1]] {
-			return false
-		}
-	}
-	// A type, then the name: int helper(), void Node::Run(), public
-	// getUser(), static const int kMax = 5.
-	m := declarator.FindStringSubmatch(rest)
-	if m == nil || m[2] != name {
-		return false
-	}
-	for _, w := range words.FindAllString(m[1], -1) {
-		if statementWords[w] {
-			return false
-		}
-	}
-	switch {
-	case skipped:
-		return true
-	case m[3] != "(":
-		// "x, y = f()" and "err := f()" assign; only a modifier or a
-		// definition word makes these a declaration.
-		return false
-	case m[1] != "":
-		return true
-	}
-	// No type: a constructor (Foo::Foo(…)) or a function whose return type
-	// is on the line above, at the start of a line not ending in ";".
-	return !indented && !strings.HasSuffix(strings.TrimSpace(line), ";")
+	return name != "" && DefinedName(line) == name
 }
 
 // commentPrefixes gives the ways a whole-line comment can start, by file
