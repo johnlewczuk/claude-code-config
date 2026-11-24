@@ -38,6 +38,31 @@ func TestMarkSectionNew(t *testing.T) {
 	}
 }
 
+func TestMarkSectionRemovedAtEnd(t *testing.T) {
+	// The PR deletes the last lines of the file: no new line follows them.
+	f := &diff.File{Path: "a.go", Hunks: []diff.Hunk{{OldStart: 1, OldLines: 3, NewStart: 1, NewLines: 1, Lines: []diff.Line{
+		{Kind: diff.Context, Old: 1, New: 1, Text: "1"},
+		{Kind: diff.Removed, Old: 2, Text: "old2"},
+		{Kind: diff.Removed, Old: 3, Text: "old3"},
+	}}}}
+	got := MarkSection(f, "new", []string{"1"}, 1, 1)
+	want := []MarkedLine{{' ', "1"}, {'-', "old2"}, {'-', "old3"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v want %v", got, want)
+	}
+}
+
+func TestSectionPromptCap(t *testing.T) {
+	var lines []MarkedLine
+	for i := 0; i < 7000; i++ {
+		lines = append(lines, MarkedLine{' ', "123456789"})
+	}
+	p := SectionPrompt(SectionInput{Path: "data.json", Lines: lines})
+	if !strings.Contains(p, "…cut here,") || len(p) > 61000 {
+		t.Errorf("not cut: %d bytes", len(p))
+	}
+}
+
 func TestMarkSectionOld(t *testing.T) {
 	text := make([]string, 12)
 	text[9], text[10], text[11] = "10", "old11", "12"

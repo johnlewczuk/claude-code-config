@@ -23,7 +23,7 @@ const Schema = `{"type":"object","additionalProperties":false,"properties":{"sum
 
 // FileSystem is the system prompt for a whole-file summary.
 const FileSystem = `You summarize one file of a GitHub pull request for the person reviewing it.
-Write at a middle level of detail: 3 to 6 sentences. Name the functions and types involved and say how they connect. If the PR description says why, say what the PR changed in this file and why. Do not go line by line.
+Write at a middle level of detail: 3 to 6 sentences. Name the functions and types involved and say how they connect. Say what the PR changed in this file, and why when the PR description says. Do not go line by line.
 Use plain words. No filler, no headings, no bullet points, no opening like "This file".`
 
 // SectionSystem is the system prompt for a summary of one section of code.
@@ -112,7 +112,8 @@ func cut(text string, limit int) string {
 }
 
 // FilePrompt is the question for a whole-file summary. fileText is the file's
-// lines after the PR (nil when the file was deleted).
+// lines after the PR, or before it when the PR deletes the file; nil when they
+// couldn't be read.
 func FilePrompt(title, body string, f diff.File, fileText []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Summarize this file from a pull request.\n\nFile: %s (%s)\nPR title: %s\n", f.Path, f.Status, title)
@@ -121,7 +122,11 @@ func FilePrompt(title, body string, f diff.File, fileText []string) string {
 	}
 	b.WriteString("\nWhat the PR changed in this file, as a diff (lines starting with + were added, lines starting with - were removed):\n" + cut(DiffText(f), maxDiffChars))
 	if len(fileText) > 0 {
-		b.WriteString("\nThe whole file after the PR:\n" + cut(strings.Join(fileText, "\n")+"\n", maxFileChars))
+		head := "The whole file after the PR"
+		if f.Status == "deleted" {
+			head = "The whole file before the PR (this PR deletes it)"
+		}
+		b.WriteString("\n" + head + ":\n" + cut(strings.Join(fileText, "\n")+"\n", maxFileChars))
 	}
 	b.WriteString("\nAnswer in plain words, with no headings.")
 	return b.String()
@@ -147,11 +152,13 @@ type SectionInput struct {
 // file before). f is nil when the PR doesn't touch the file.
 func MarkSection(f *diff.File, side string, text []string, start, end int) []MarkedLine {
 	added := map[int]bool{}
-	removedNew := map[int][]string{} // removed lines, keyed by the next new line after them
+	removedBefore := map[int][]string{} // removed lines, keyed by the next new line after them
+	removedAfter := map[int][]string{}  // removed lines at the end of a hunk, keyed by its last new line
 	removedOld := map[int]bool{}
 	if f != nil {
 		for _, h := range f.Hunks {
 			var pending []string
+			last := 0
 			for _, l := range h.Lines {
 				switch l.Kind {
 				case diff.Removed:
@@ -161,11 +168,17 @@ func MarkSection(f *diff.File, side string, text []string, start, end int) []Mar
 					added[l.New] = true
 					fallthrough
 				default:
-					if l.New > 0 && len(pending) > 0 {
-						removedNew[l.New] = append(removedNew[l.New], pending...)
-						pending = nil
+					if l.New > 0 {
+						last = l.New
+						if len(pending) > 0 {
+							removedBefore[l.New] = append(removedBefore[l.New], pending...)
+							pending = nil
+						}
 					}
 				}
+			}
+			if last > 0 && len(pending) > 0 {
+				removedAfter[last] = append(removedAfter[last], pending...)
 			}
 		}
 	}
@@ -182,7 +195,7 @@ func MarkSection(f *diff.File, side string, text []string, start, end int) []Mar
 			out = append(out, MarkedLine{mark, text[n-1]})
 			continue
 		}
-		for _, t := range removedNew[n] {
+		for _, t := range removedBefore[n] {
 			out = append(out, MarkedLine{'-', t})
 		}
 		mark := byte(' ')
@@ -190,6 +203,9 @@ func MarkSection(f *diff.File, side string, text []string, start, end int) []Mar
 			mark = '+'
 		}
 		out = append(out, MarkedLine{mark, text[n-1]})
+		for _, t := range removedAfter[n] {
+			out = append(out, MarkedLine{'-', t})
+		}
 	}
 	return out
 }
@@ -212,7 +228,7 @@ func SectionPrompt(in SectionInput) string {
 		fmt.Fprintf(&b, "Explain the selected lines in the file %s.\n", in.Path)
 	}
 	b.WriteString("\nThe code follows. A line starting with + was added by the PR, a line starting with - was removed by the PR, and a line starting with a space is unchanged:\n\n")
-	b.WriteString(markedText(in.Lines))
+	b.WriteString(cut(markedText(in.Lines), maxFileChars))
 	if len(in.Uses) > 0 {
 		b.WriteString("\nUsed in:\n")
 		for i, u := range in.Uses {
