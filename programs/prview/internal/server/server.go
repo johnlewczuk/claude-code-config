@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/github"
 	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/gitrepo"
 	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/gopls"
+	"github.com/johnlewczuk/claude-code-config/programs/prview/internal/summary"
 )
 
 //go:embed all:dist
@@ -56,6 +58,11 @@ type Server struct {
 
 	gopls *gopls.Pool // nil when gopls isn't installed
 
+	// summarize asks Claude (model sonnet, no tools) for a summary; nil when
+	// claude isn't installed. Tests replace it.
+	summarize func(ctx context.Context, system, prompt string) (string, error)
+	store     summary.Store // saved summaries
+
 	// checkout puts the loaded head in a folder and returns the folder and
 	// the head. It is s.worktree except in tests.
 	checkout func(*http.Request, *prState) (dir, head string, err error)
@@ -73,6 +80,8 @@ func New(gh GitHub, claudeRunner *claude.Runner, cacheDir, key string) *Server {
 	s := &Server{gh: gh, claude: claudeRunner, cache: cacheDir, key: key,
 		prs: map[string]*prState{}, repos: map[string]*gitrepo.Repo{}}
 	s.checkout = s.worktree
+	s.store = summary.Store{Dir: filepath.Join(cacheDir, "summaries")}
+	s.setSummarize()
 	if bin, err := exec.LookPath("gopls"); err == nil {
 		s.gopls = gopls.NewPool(s.startGopls(bin), 10*time.Minute, 2)
 	} else {
@@ -122,6 +131,10 @@ func (s *Server) Handler() http.Handler {
 	api("GET /threads", s.handleThreads)
 	api("GET /order", s.handleOrder)
 	api("POST /order/redo", s.handleOrderRedo)
+	api("GET /summaries", s.handleSummaries)
+	api("POST /summaries/redo", s.handleSummariesRedo)
+	api("GET /sections", s.handleSections)
+	api("POST /summary/section", s.handleSectionSummary)
 	api("POST /viewed", s.handleViewed)
 	api("POST /comment", s.handleComment)
 	api("POST /reply", s.handleReply)

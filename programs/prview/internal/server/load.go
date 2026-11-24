@@ -34,6 +34,9 @@ type prState struct {
 	ordRunning bool
 	ordGen     int // bumps on every reload/redo so stale runs are ignored
 
+	sums   map[string]*fileSum // file summaries by path
+	sumGen int                 // bumps on every reload so a stale run is ignored
+
 	chatMu sync.Mutex // one question at a time per PR
 }
 
@@ -111,6 +114,7 @@ func (s *Server) load(ctx context.Context, st *prState, progress func(string)) (
 	}
 	st.mu.Unlock()
 	s.startOrder(st, false)
+	s.startSummaries(st)
 
 	return &loadPayload{Owner: st.owner, Repo: st.name, PR: pr, Base: base, Head: head, Files: files,
 		Order: st.orderPayload(), Claude: s.claude != nil}, nil
