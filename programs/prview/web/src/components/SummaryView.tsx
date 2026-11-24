@@ -15,19 +15,17 @@ interface Props {
   side: 'new' | 'old'
   sidePath: string
   open(s: Section): void
-  /** The file's summary box. */
-  summary: ComponentChildren
   /** The code of some of the rows, as a unified diff table. */
   code(rows: Row[]): ComponentChildren
 }
 
 /**
  * A file as notes in a left pane beside its code: one block per section with
- * its note or Summarize button level with its rows, and the file summary at
- * the top of the first block, so the code starts beside it. Each block is as
- * tall as the taller side.
+ * its note or Summarize button level with its rows. Each block is as tall as
+ * the taller side. The file summary sits above, across both panes, as in the
+ * other views.
  */
-export function SummaryView({ rows, sections, side, sidePath, open, summary, code }: Props) {
+export function SummaryView({ rows, sections, side, sidePath, open, code }: Props) {
   const rv = useReview()
   // A deleted file has no new side to show.
   const mode = side === 'old' ? 'diff' : rv.codeMode
@@ -50,12 +48,11 @@ export function SummaryView({ rows, sections, side, sidePath, open, summary, cod
           )}
         </div>
       </div>
-      {blocks.map((b, k) => {
+      {blocks.map((b) => {
         const note = b.section && rv.notes.get(noteKey(sectionReq(sidePath, side, b.section)))
         return (
           <div class="sv-row sv-block" key={blockKey(b)}>
             <div class="sv-left">
-              {k === 0 && summary}
               {note ? <SummaryNote note={note} /> : b.section && <SummarizeButton section={b.section} open={open} />}
             </div>
             <div class="sv-right">{code(b.rows)}</div>

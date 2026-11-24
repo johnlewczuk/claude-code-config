@@ -163,7 +163,7 @@ export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setV
       </div>
       {!collapsed && (
         <>
-          {(!summaryView || binary) && summary}
+          {summary}
           {loose.length > 0 && <LooseThreads threads={loose} />}
           {binary ? (
             <div class="empty">{file.binary ? 'Binary file not shown.' : 'No text changes (mode or rename only).'}</div>
@@ -174,7 +174,6 @@ export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setV
               side={side}
               sidePath={sidePath}
               open={marks.open}
-              summary={summary}
               code={(part) => <UnifiedTable {...table} rows={part} />}
             />
           ) : rv.view === 'split' ? (

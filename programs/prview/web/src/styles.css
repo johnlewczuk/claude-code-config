@@ -1404,10 +1404,6 @@ td.flash {
 .sv-block > .sv-left {
   padding: 6px 8px;
 }
-/* The file summary fills the top of the first block's note cell. */
-.sv-block > .sv-left > .fsum {
-  margin: -6px -8px 6px;
-}
 .sv-block .sbtn {
   float: none;
   max-width: 100%;
