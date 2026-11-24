@@ -1,6 +1,6 @@
 # prview
 
-A local web page for reviewing GitHub pull requests, with four things
+A local web page for reviewing GitHub pull requests, with five things
 github.com doesn't give you:
 
 - **Which commit changed each line.** Every added or removed line has a tag
@@ -20,6 +20,12 @@ github.com doesn't give you:
   browser's) returns to the diff where you were. Go answers are exact when
   `gopls` is installed; other languages are found by name, so a result may
   include other functions with the same name.
+- **Summaries.** Claude (Sonnet) writes a short summary of each changed file
+  in the background; it shows under the file's name. A Summarize button on
+  each function or section, or on the lines you select, explains just that
+  part and what the PR changed in it. The Summary view (the third button, next
+  to Unified and Split) lists each section's summary beside its code, shown
+  as "diff" or "new only". Nothing is added to the PR description.
 
 You can also do a normal review: comment on lines or ranges, suggest changes,
 reply, resolve, mark files Viewed (shared with github.com), and submit as
@@ -57,6 +63,7 @@ Needs `gh` (logged in), `git`, and `claude` for the Claude parts. Set
 - `~/.cache/prview/worktrees/`: a checkout per PR, for Claude to read.
 - `~/.cache/prview/orders/`, `chats/`: saved reading orders and Claude
   conversations.
+- `~/.cache/prview/summaries/`: saved file and section summaries.
 
 ## Build
 

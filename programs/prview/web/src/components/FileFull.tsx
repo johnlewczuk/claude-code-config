@@ -66,6 +66,7 @@ export function FileFull({ spot, trail }: Props) {
         lang={null}
         added={added}
         peekable
+        sections={{ path: spot.path, side: spot.side }}
         onCtrlClick={(t) => rv.openPeek({ full: true, line: t.line }, { ...t, path: spot.path, side: spot.side })}
       />
     </div>

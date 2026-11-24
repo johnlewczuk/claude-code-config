@@ -1,3 +1,4 @@
+import type { ComponentChildren } from 'preact'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { useReview } from '../ctx'
 import { languageFor } from '../highlight'
@@ -5,6 +6,8 @@ import { fetchFile } from '../lines'
 import type { DLine } from '../rows'
 import { Chip, Code, codeClick, noSelectWithCtrl } from './Code'
 import { Peek } from './Peek'
+import { SummarizeButton, SummaryNote } from './SummaryNote'
+import { noteKey, sectionReq } from '../summaries'
 
 interface Props {
   path: string
@@ -19,10 +22,12 @@ interface Props {
   /** Where to scroll to instead of centring `line`. */
   scroll?: number
   onScroll?(top: number): void
+  /** Give each section of this file a Summarize button and show its open note. */
+  sections?: { path: string; side: 'new' | 'old' }
 }
 
 /** A whole file with a gutter and syntax colours, the given line marked and centred. */
-export function CodeView({ path, side, line, lang, onCtrlClick, added, peekable, scroll, onScroll }: Props) {
+export function CodeView({ path, side, line, lang, onCtrlClick, added, peekable, scroll, onScroll, sections }: Props) {
   const rv = useReview()
   const [lines, setLines] = useState<string[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -54,6 +59,9 @@ export function CodeView({ path, side, line, lang, onCtrlClick, added, peekable,
   }, [lines, line])
 
   const language = lang ?? languageFor(path)
+  const found = sections && !rv.sums.off ? rv.sectionsOf(sections.path, sections.side) : null
+  const starts = useMemo(() => new Map((found ?? []).map((s) => [s.start, s])), [found])
+  const { openNote } = rv
   const rows = useMemo(
     () =>
       (lines ?? []).map((text, i) => {
@@ -76,12 +84,15 @@ export function CodeView({ path, side, line, lang, onCtrlClick, added, peekable,
                 if (t) onCtrlClick({ ...t, line: n })
               }}
             >
+              {starts.get(n) && (
+                <SummarizeButton section={starts.get(n)!} open={(s) => openNote(sectionReq(sections!.path, sections!.side, s))} />
+              )}
               <Code line={{ kind, text }} lang={language} />
             </td>
           </tr>
         )
       }),
-    [lines, added, line, language],
+    [lines, added, line, language, starts, openNote, sections],
   )
 
   if (error)
@@ -101,6 +112,21 @@ export function CodeView({ path, side, line, lang, onCtrlClick, added, peekable,
       </td>
     </tr>
   )
+  const out: ComponentChildren[] = []
+  rows.forEach((row, i) => {
+    out.push(row)
+    if (i + 1 === at) out.push(peekRow)
+    const s = starts.get(i + 1)
+    const note = s && rv.notes.get(noteKey(sectionReq(sections!.path, sections!.side, s)))
+    if (note)
+      out.push(
+        <tr key={'n' + i} class="note-row">
+          <td colSpan={added ? 3 : 2}>
+            <SummaryNote note={note} />
+          </td>
+        </tr>,
+      )
+  })
   return (
     <div class="cv" ref={box} onScroll={onScroll && ((e) => onScroll((e.currentTarget as HTMLElement).scrollTop))}>
       <table class="diff cv-table">
@@ -109,7 +135,7 @@ export function CodeView({ path, side, line, lang, onCtrlClick, added, peekable,
           <col class="col-ln" />
           <col />
         </colgroup>
-        <tbody>{at ? [...rows.slice(0, at), peekRow, ...rows.slice(at)] : rows}</tbody>
+        <tbody>{out}</tbody>
       </table>
     </div>
   )
