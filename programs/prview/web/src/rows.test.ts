@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fileLines, rangeSelection, refOf, splitRows, unifiedRows, type Expansion } from './rows'
+import { fileLines, rangeSelection, refOf, splitRows, stepTarget, unifiedRows, type Expansion } from './rows'
 import type { DiffFile } from './types'
 
 // A file with lines 1-20 where line 5 changed and line 15 was removed.
@@ -77,5 +77,28 @@ describe('ranges', () => {
     const r = { path: 'a.go', start: refOf(lines[1]), end: refOf(lines[3]) }
     expect(r.start).toEqual({ side: 'LEFT', line: 5, idx: 1 })
     expect(rangeSelection(r, lines)).toEqual({ path: 'a.go', side: 'new', start: 5, end: 6 })
+  })
+})
+
+describe('stepTarget', () => {
+  const at = (side: 'new' | 'old', n: number) => {
+    const l = stepTarget(lines, side, n)
+    return l && `${l.kind} ${l.old ?? ''}/${l.new ?? ''}`
+  }
+  it('lands on the first changed line, not the unchanged lines before it', () => {
+    // A function defined on line 2, above the hunk: its change is on line 5.
+    expect(at('new', 2)).toBe('del 5/')
+    expect(at('new', 4)).toBe('del 5/')
+    expect(at('new', 5)).toBe('add /5')
+  })
+  it('skips to the next hunk when the rest of this one is unchanged', () => {
+    expect(at('new', 6)).toBe('del 15/')
+  })
+  it('counts the old side for steps on removed code', () => {
+    expect(at('old', 14)).toBe('del 15/')
+  })
+  it('falls back to the line itself, then to the last line, when no change follows', () => {
+    expect(at('new', 15)).toBe('ctx 16/15')
+    expect(at('new', 18)).toBe('ctx 16/15')
   })
 })

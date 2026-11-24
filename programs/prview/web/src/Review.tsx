@@ -8,7 +8,7 @@ import { OrderPanel } from './components/OrderPanel'
 import { SubmitDialog } from './components/SubmitDialog'
 import { TopBar } from './components/TopBar'
 import { formKey, ReviewCtx, type ReviewApi, type View } from './ctx'
-import { fileLines, type Range } from './rows'
+import { fileLines, stepTarget, type Range } from './rows'
 import type { DiffFile, GHFile, LoadPayload, OrderState, Step, Thread, ThreadsPayload } from './types'
 import { commitIndex, loadPref, savePref, type CommitInfo } from './util'
 
@@ -293,9 +293,9 @@ export function Review({ owner, repo, number }: Props) {
     setTimeout(() => {
       let el: Element | null = null
       if (step && step.startLine > 0) {
-        const lines = fileLines(file)
-        const target = nearestLine(lines, step.side, step.startLine)
-        if (target) el = document.querySelector(`[data-${step.side === 'old' ? 'o' : 'r'}="${fi}:${target}"]`)
+        const t = stepTarget(fileLines(file), step.side, step.startLine)
+        // A removed line only has an old-side number.
+        if (t) el = document.querySelector(t.new ? `[data-r="${fi}:${t.new}"]` : `[data-o="${fi}:${t.old}"]`)
       }
       el ??= document.getElementById(`file-${fi}`)
       if (!el) return
@@ -406,20 +406,4 @@ function orderFiles(files: DiffFile[], order: OrderState): { file: DiffFile; ind
   return indexed.sort((a, b) => (rank.get(a.index) ?? 1e9 + a.index) - (rank.get(b.index) ?? 1e9 + b.index))
 }
 
-/** The diff line closest at or after `n` on that side, so a step lands on changed code. */
-function nearestLine(lines: ReturnType<typeof fileLines>, side: 'new' | 'old', n: number): number | null {
-  let best: number | null = null
-  for (const l of lines) {
-    const v = side === 'old' ? l.old : l.new
-    if (!v) continue
-    if (v >= n && (best === null || v < best)) best = v
-  }
-  if (best !== null) return best
-  // Step is below every hunk: take the last line.
-  for (const l of lines) {
-    const v = side === 'old' ? l.old : l.new
-    if (v) best = v
-  }
-  return best
-}
 

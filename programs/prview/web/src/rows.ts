@@ -31,6 +31,20 @@ export function fileLines(file: DiffFile): DLine[] {
 }
 
 /**
+ * The line a reading-order step starting at line `n` lands on: the first
+ * added or removed line at or after it, not the unchanged lines shown around
+ * a hunk. A step from the PR description starts where its function is
+ * defined, which is often outside the diff. Without a change after it, the
+ * first diff line at or after `n`, else the last line on that side.
+ */
+export function stepTarget(lines: DLine[], side: 'new' | 'old', n: number): DLine | null {
+  const num = (l: DLine) => (side === 'old' ? l.old : l.new)
+  const at = lines.findIndex((l) => (num(l) ?? 0) >= n)
+  if (at < 0) return [...lines].reverse().find((l) => num(l) !== undefined) ?? null
+  return lines.slice(at).find((l) => l.kind !== 'ctx') ?? lines[at]
+}
+
+/**
  * Unified rows. `source` holds the lines of the file (new side, or old side
  * for a deleted file) once fetched; without it, gaps can't be opened.
  */
