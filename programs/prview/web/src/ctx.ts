@@ -2,13 +2,14 @@ import { createContext } from 'preact'
 import { useContext } from 'preact/hooks'
 import type { Range } from './rows'
 import type { PeekActions } from './peek'
+import type { SummaryActions } from './summaries'
 import type { LoadPayload, Selection, Spot, Thread } from './types'
 import type { CommitInfo } from './util'
 
 export type View = 'unified' | 'split'
 
 /** What every part of the review screen can read and do. */
-export interface ReviewApi extends PeekActions {
+export interface ReviewApi extends PeekActions, SummaryActions {
   data: LoadPayload
   api: string // /api/pr/owner/repo/n
   commits: Map<string, CommitInfo>

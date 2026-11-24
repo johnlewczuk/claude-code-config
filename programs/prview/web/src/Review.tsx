@@ -7,6 +7,7 @@ import { FileFull } from './components/FileFull'
 import { FileView } from './components/FileView'
 import { OrderPanel } from './components/OrderPanel'
 import { usePeek } from './peek'
+import { useSummaries } from './summaries'
 import { SubmitDialog } from './components/SubmitDialog'
 import { TopBar } from './components/TopBar'
 import { formKey, ReviewCtx, type ReviewApi, type View } from './ctx'
@@ -66,6 +67,21 @@ export function Review({ owner, repo, number }: Props) {
     setToasts((t) => [...t, { id, msg }])
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 6000)
   }, [])
+
+  const sumState = useSummaries(api, data, toast)
+  const { closeNote } = sumState
+  // Esc closes the most recently opened note, unless the peek (which takes Esc itself) is open.
+  const escNow = useRef({ peekOpen: false, notes: sumState.notes })
+  escNow.current = { peekOpen: !!peekState.peek, notes: sumState.notes }
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || escNow.current.peekOpen || typing(e.target)) return
+      const last = [...escNow.current.notes.keys()].pop()
+      if (last) closeNote(last)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [closeNote])
 
   // Load (and reload) the PR, streaming progress.
   const load = useCallback(async () => {
@@ -288,6 +304,7 @@ export function Review({ owner, repo, number }: Props) {
       return result
     },
     ...peekState,
+    ...sumState,
     openFully(s) {
       // Remember where the diff was scrolled to, so Back lands there.
       if (!trailNow.current.length) history.replaceState({ trail: [], scroll: scrollerOf(mid.current)?.scrollTop }, '')
@@ -429,11 +446,12 @@ export function Review({ owner, repo, number }: Props) {
             {spot && <FileFull spot={spot} trail={trail} />}
             <div hidden={!!spot}>
               <Description />
-              {ordered.map(({ file, index }) => (
+              {ordered.map(({ file, index }, i) => (
                 <FileView
                   key={file.path}
                   file={file}
                   index={index}
+                  first={i === 0}
                   viewed={viewedOf(file.path)}
                   collapsed={collapsed.has(file.path)}
                   toggleCollapsed={() => toggleCollapsed(file.path)}
@@ -470,6 +488,11 @@ export function Review({ owner, repo, number }: Props) {
       </div>
     </ReviewCtx.Provider>
   )
+}
+
+/** Whether a key went to a text field, where Esc belongs to the field. */
+function typing(t: EventTarget | null): boolean {
+  return t instanceof HTMLElement && (t.isContentEditable || t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')
 }
 
 /** The element that scrolls the middle pane: the pane itself, or the whole body in the narrow layout. */

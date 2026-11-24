@@ -1085,15 +1085,18 @@ td.flash {
   margin-top: 32px;
 }
 
-/* Peek window (Ctrl+click on a name). Child selectors: the code table inside
-   the peek is a .diff too, and its cells must keep the code look. */
-.diff > tbody > tr.peek-row > td {
+/* Peek window (Ctrl+click on a name), and summary notes in the same kind of
+   box. Child selectors: the code table inside the peek is a .diff too, and
+   its cells must keep the code look. */
+.diff > tbody > tr.peek-row > td,
+.diff > tbody > tr.note-row > td {
   padding: 6px 10px 8px 70px;
   background: var(--bg);
   font-family: var(--sans);
   white-space: normal;
 }
-.peek {
+.peek,
+.snote {
   border: 1px solid var(--accent);
   border-radius: 6px;
   background: var(--bg);
@@ -1101,7 +1104,8 @@ td.flash {
   outline: none;
   overflow: hidden;
 }
-.peek-head {
+.peek-head,
+.snote-head {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1110,7 +1114,8 @@ td.flash {
   border-bottom: 1px solid var(--border);
   font-size: 12px;
 }
-.peek-name {
+.peek-name,
+.snote-name {
   font: 600 12px var(--mono);
 }
 .peek-trail .meta {
@@ -1219,7 +1224,8 @@ td.flash {
 }
 
 @media (max-width: 800px) {
-  .diff > tbody > tr.peek-row > td {
+  .diff > tbody > tr.peek-row > td,
+  .diff > tbody > tr.note-row > td {
     padding-left: 10px;
   }
   .peek-cols {
@@ -1233,6 +1239,75 @@ td.flash {
   }
   .peek-list {
     flex: 0 0 38%;
+  }
+}
+
+/* Summaries: the file's under its name bar, and the Summarize buttons on
+   the row where a section starts. */
+.fsum {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 6px 10px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.fsum-text {
+  flex: 1;
+  min-width: 0;
+}
+.fsum-text .md p {
+  margin: 0 0 4px;
+}
+.fsum-text .md p:last-child {
+  margin-bottom: 0;
+}
+.fsum .error {
+  color: var(--danger);
+}
+.fsum-btns {
+  display: flex;
+  gap: 10px;
+  white-space: nowrap;
+}
+.snote-body {
+  padding: 8px 14px 10px;
+  font-size: 13px;
+  max-width: 920px;
+}
+.snote-body.error {
+  color: var(--danger);
+}
+.sbtn {
+  float: right;
+  max-width: 45%;
+  margin-left: 8px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--accent);
+  font: 11px/16px var(--sans);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: none;
+  opacity: 0.35;
+}
+.diff tr:hover .sbtn,
+.sbtn:focus-visible {
+  opacity: 1;
+}
+.diff tr.gap .sbtn {
+  float: none;
+  margin-left: 10px;
+  opacity: 1;
+}
+@media (hover: none) {
+  .sbtn {
+    opacity: 1;
   }
 }
 

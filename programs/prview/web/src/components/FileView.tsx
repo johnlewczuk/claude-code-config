@@ -19,15 +19,20 @@ import {
   type Range,
 } from '../rows'
 import type { PeekAnchor } from '../peek'
-import type { DiffFile, LineRef, Side, Thread } from '../types'
+import { noteKey, noteRows, sectionButtons } from '../summaries'
+import type { DiffFile, LineRef, Note, Section, Side, Thread } from '../types'
+import { markdown } from '../util'
 import { CommentForm } from './CommentForm'
 import { Chip, Code, codeClick, noSelectWithCtrl } from './Code'
 import { Peek } from './Peek'
+import { SummaryNote } from './SummaryNote'
 import { ThreadView } from './ThreadView'
 
 interface Props {
   file: DiffFile
   index: number
+  /** The first file shown, which says so when there are no summaries at all. */
+  first: boolean
   viewed: string
   collapsed: boolean
   toggleCollapsed(): void
@@ -36,7 +41,19 @@ interface Props {
 
 const STEP = 20
 
-export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setViewed }: Props) {
+/** A row of the diff: a line, or the gap row of hidden lines. */
+type Item = DLine | Gap
+
+/** A file's Summarize buttons and open notes, by the row they go on. */
+interface SumMarks {
+  /** The side the sections were read from: the new side, or the old for a deleted file. */
+  side: 'new' | 'old'
+  buttons: Map<Item, Section>
+  notes: Map<Item, Note[]>
+  open(s: Section): void
+}
+
+export function FileView({ file, index, first, viewed, collapsed, toggleCollapsed, setViewed }: Props) {
   const rv = useReview()
   const lines = useMemo(() => fileLines(file), [file])
   const lang = useMemo(() => languageFor(file.path), [file.path])
@@ -59,6 +76,30 @@ export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setV
   }, [rv.threads, lines, file.path])
 
   const rows = useMemo(() => unifiedRows(file, lines, exp, source), [file, lines, exp, source])
+  const binary = file.binary || !file.hunks?.length
+  const [sumHidden, setSumHidden] = useState(false)
+
+  // Summaries: none until the page knows them, and never when they are off.
+  const fsum = rv.sums.files[file.path]
+  const side = file.status === 'deleted' ? 'old' : 'new'
+  const sidePath = side === 'old' ? file.oldPath : file.path
+  const sections = fsum && !collapsed && !binary ? rv.sectionsOf(sidePath, side) : null
+  const { notes, openNote } = rv
+  const marks = useMemo((): SumMarks => {
+    const fileNotes = [...notes.values()].filter((n) => n.req.path === (n.req.side === 'old' ? file.oldPath : file.path))
+    const buttons = sections ? sectionButtons(rows, sections, side) : new Map<number, Section>()
+    const item = (i: number): Item => {
+      const r = rows[i]
+      return r.t === 'gap' ? r.gap : r.line
+    }
+    const byItem = <T,>(m: Map<number, T>) => new Map([...m].map(([i, v]) => [item(i), v]))
+    return {
+      side,
+      buttons: byItem(buttons),
+      notes: byItem(noteRows(rows, buttons, side, fileNotes)),
+      open: (s) => openNote({ path: sidePath, side, start: s.start, end: s.end, name: s.name }),
+    }
+  }, [rows, sections, side, sidePath, notes, openNote, file])
 
   const expand = async (gap: Gap, dir: 'down' | 'up' | 'all') => {
     let src = source
@@ -87,7 +128,6 @@ export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setV
   }
 
   const threadCount = rv.threads.filter((t) => t.path === file.path).length
-  const binary = file.binary || !file.hunks?.length
 
   return (
     <section class="file" id={`file-${index}`}>
@@ -108,6 +148,11 @@ export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setV
         {threadCount > 0 && <span class="meta">💬 {threadCount}</span>}
         <span class="sp" />
         <span class="add-n">+{file.additions}</span> <span class="del-n">−{file.deletions}</span>
+        {sumHidden && fsum && !collapsed && (
+          <button class="linkish" onClick={() => setSumHidden(false)} title="Show this file's summary">
+            ⌄ summary
+          </button>
+        )}
         {viewed === 'DISMISSED' && <span class="tag warn">changed since viewed</span>}
         <label class="viewed">
           <input type="checkbox" checked={viewed === 'VIEWED'} onChange={(e) => setViewed((e.target as HTMLInputElement).checked)} /> Viewed
@@ -115,13 +160,14 @@ export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setV
       </div>
       {!collapsed && (
         <>
+          {!sumHidden && <FileSummary path={file.path} first={first} hide={() => setSumHidden(true)} />}
           {loose.length > 0 && <LooseThreads threads={loose} />}
           {binary ? (
             <div class="empty">{file.binary ? 'Binary file not shown.' : 'No text changes (mode or rename only).'}</div>
           ) : rv.view === 'split' ? (
-            <SplitTable file={file} index={index} rows={rows} lines={lines} lang={lang} byKey={byKey} expand={expand} />
+            <SplitTable file={file} index={index} rows={rows} lines={lines} lang={lang} byKey={byKey} marks={marks} expand={expand} />
           ) : (
-            <UnifiedTable file={file} index={index} rows={rows} lines={lines} lang={lang} byKey={byKey} expand={expand} />
+            <UnifiedTable file={file} index={index} rows={rows} lines={lines} lang={lang} byKey={byKey} marks={marks} expand={expand} />
           )}
         </>
       )}
@@ -136,15 +182,17 @@ interface TableProps {
   lines: DLine[]
   lang: string | null
   byKey: Map<string, Thread[]>
+  marks: SumMarks
   expand(gap: Gap, dir: 'down' | 'up' | 'all'): void
 }
 
-function UnifiedTable({ file, index, rows, lines, lang, byKey, expand }: TableProps) {
+function UnifiedTable({ file, index, rows, lines, lang, byKey, marks, expand }: TableProps) {
   const rv = useReview()
   const out: ComponentChildren[] = []
   rows.forEach((r, i) => {
     if (r.t === 'gap') {
-      out.push(<GapRow key={'g' + i} gap={r.gap} cols={4} expand={expand} />)
+      out.push(<GapRow key={'g' + i} gap={r.gap} cols={4} expand={expand} button={sectionButton(marks, r.gap)} />)
+      out.push(...summaryRows(marks.notes.get(r.gap), 4))
       return
     }
     const l = r.line
@@ -172,11 +220,12 @@ function UnifiedTable({ file, index, rows, lines, lang, byKey, expand }: TablePr
           onMouseDown={noSelectWithCtrl}
           onClick={(e) => ctrlClick(rv, file, index, lang, e, l, l.kind === 'del' ? 'old' : 'new')}
         >
+          {sectionButton(marks, l)}
           <Code line={l} lang={lang} />
         </td>
       </tr>,
     )
-    out.push(...extras(rv, file, index, lines, l, keysForLine(l), byKey, 4, i))
+    out.push(...extras(rv, file, index, lines, l, keysForLine(l), byKey, 4, i, marks.notes.get(l)))
   })
   return (
     <table class="diff unified">
@@ -191,12 +240,15 @@ function UnifiedTable({ file, index, rows, lines, lang, byKey, expand }: TablePr
   )
 }
 
-function SplitTable({ file, index, rows, lines, lang, byKey, expand }: TableProps) {
+function SplitTable({ file, index, rows, lines, lang, byKey, marks, expand }: TableProps) {
   const rv = useReview()
   const out: ComponentChildren[] = []
+  // The side whose code cells carry the Summarize buttons.
+  const buttonSide: Side = marks.side === 'old' ? 'LEFT' : 'RIGHT'
   splitRows(rows).forEach((r, i) => {
     if (r.t === 'gap') {
-      out.push(<GapRow key={'g' + i} gap={r.gap} cols={6} expand={expand} />)
+      out.push(<GapRow key={'g' + i} gap={r.gap} cols={6} expand={expand} button={sectionButton(marks, r.gap)} />)
+      out.push(...summaryRows(marks.notes.get(r.gap), 6))
       return
     }
     const half = (l: DLine | null, side: Side) => {
@@ -221,6 +273,7 @@ function SplitTable({ file, index, rows, lines, lang, byKey, expand }: TableProp
           onMouseDown={noSelectWithCtrl}
           onClick={(e) => ctrlClick(rv, file, index, lang, e, l, l.kind === 'del' ? 'old' : 'new')}
         >
+          {side === buttonSide && sectionButton(marks, l)}
           <Code line={l} lang={lang} />
         </td>,
       ]
@@ -233,7 +286,8 @@ function SplitTable({ file, index, rows, lines, lang, byKey, expand }: TableProp
     )
     const keys = [...(r.left ? keysForLine(r.left, 'LEFT') : []), ...(r.right ? keysForLine(r.right, 'RIGHT') : [])]
     const anchor = r.right ?? r.left!
-    out.push(...extras(rv, file, index, lines, anchor, [...new Set(keys)], byKey, 6, i, r.left))
+    const notes = [...(r.right ? marks.notes.get(r.right) ?? [] : []), ...(r.left && r.left !== r.right ? marks.notes.get(r.left) ?? [] : [])]
+    out.push(...extras(rv, file, index, lines, anchor, [...new Set(keys)], byKey, 6, i, notes, r.left))
   })
   return (
     <table class="diff split">
@@ -251,8 +305,8 @@ function SplitTable({ file, index, rows, lines, lang, byKey, expand }: TableProp
 }
 
 /**
- * The rows that follow a line: its threads, the selection's action bar, and
- * any open comment form that ends on it.
+ * The rows that follow a line: its threads, the peek, its summary notes, the
+ * selection's action bar, and any open comment form that ends on it.
  */
 function extras(
   rv: ReturnType<typeof useReview>,
@@ -264,6 +318,7 @@ function extras(
   byKey: Map<string, Thread[]>,
   cols: number,
   i: number,
+  notes: Note[] | undefined,
   other?: DLine | null,
 ): ComponentChildren[] {
   const out: ComponentChildren[] = []
@@ -288,6 +343,7 @@ function extras(
         </td>
       </tr>,
     )
+  out.push(...summaryRows(notes, cols))
   const endsHere = (r: Range | null) =>
     !!r && r.path === file.path && l.idx >= 0 && (r.end.idx === l.idx || (other != null && other.idx === r.end.idx))
   const sel = rv.selection
@@ -295,7 +351,7 @@ function extras(
     out.push(
       <tr key={'a' + i} class="thread-row">
         <td colSpan={cols}>
-          <SelectionBar range={sel!} lines={lines} />
+          <SelectionBar file={file} range={sel!} lines={lines} />
         </td>
       </tr>,
     )
@@ -337,9 +393,86 @@ function peekHangsHere(a: PeekAnchor | undefined, index: number, l: DLine, other
   return same(l) || (!!other && same(other))
 }
 
-function SelectionBar({ range, lines }: { range: Range; lines: DLine[] }) {
+/** The ▸ Summarize button of the section that starts on this row, if one does. */
+function sectionButton(marks: SumMarks, at: Item) {
+  const s = marks.buttons.get(at)
+  if (!s) return null
+  return (
+    <button
+      class="sbtn"
+      onClick={(e) => {
+        e.stopPropagation()
+        marks.open(s)
+      }}
+      title="Ask Claude what this part of the file does and what this PR changed in it"
+    >
+      ▸ Summarize {s.name || 'top of file'}
+    </button>
+  )
+}
+
+/** Rows holding summary notes, under the row they belong to. */
+function summaryRows(notes: Note[] | undefined, cols: number): ComponentChildren[] {
+  return (notes ?? []).map((n) => (
+    <tr key={'n' + noteKey(n.req)} class="note-row">
+      <td colSpan={cols}>
+        <SummaryNote note={n} />
+      </td>
+    </tr>
+  ))
+}
+
+/** The file's summary, under its name bar. */
+function FileSummary({ path, first, hide }: { path: string; first: boolean; hide(): void }) {
+  const rv = useReview()
+  if (rv.sums.off)
+    return first ? (
+      <div class="fsum meta" title={rv.sums.off}>
+        Summaries need the claude command
+      </div>
+    ) : null
+  const s = rv.sums.files[path]
+  if (!s) return null
+  return (
+    <div class="fsum">
+      <div class="fsum-text">
+        {s.status === 'ready' ? (
+          <div class="md" dangerouslySetInnerHTML={{ __html: markdown(s.text) }} />
+        ) : s.status === 'skipped' ? (
+          <span class="meta">Skipped: {s.text}</span>
+        ) : s.status === 'failed' ? (
+          <span class="error">
+            Could not summarize: {s.error}{' '}
+            <button class="linkish" onClick={() => rv.redoSum(path)}>
+              Retry
+            </button>
+          </span>
+        ) : (
+          <span class="meta">Summarizing…</span>
+        )}
+      </div>
+      <span class="fsum-btns">
+        {s.status === 'ready' && (
+          <button class="linkish" onClick={() => rv.redoSum(path)} title="Ask Claude to write this summary again">
+            ↻ redo
+          </button>
+        )}
+        <button class="linkish" onClick={hide} title="Hide this summary until the page is reloaded">
+          ⌃ hide
+        </button>
+      </span>
+    </div>
+  )
+}
+
+function SelectionBar({ file, range, lines }: { file: DiffFile; range: Range; lines: DLine[] }) {
   const rv = useReview()
   const n = range.end.idx - range.start.idx + 1
+  const summarize = () => {
+    const s = rangeSelection(range, lines)
+    rv.openNote({ ...s, path: s.side === 'old' ? file.oldPath : file.path, name: '' })
+    rv.clearSelection()
+  }
   return (
     <div class="selbar">
       <span class="meta">{n === 1 ? `Line ${range.end.line}` : `${n} lines`} selected · shift-click another line to select a range</span>
@@ -350,6 +483,11 @@ function SelectionBar({ range, lines }: { range: Range; lines: DLine[] }) {
       {rv.data.claude && (
         <button class="btn" onClick={() => rv.askClaude(rangeSelection(range, lines))}>
           ✦ Ask Claude
+        </button>
+      )}
+      {rv.sums.files[file.path] && (
+        <button class="btn" onClick={summarize} title="Ask Claude what these lines do and what this PR changed in them">
+          Summarize
         </button>
       )}
       <button class="btn" onClick={rv.clearSelection}>
@@ -391,7 +529,15 @@ function NewComment({ range, lines }: { range: Range; lines: DLine[] }) {
   )
 }
 
-function GapRow({ gap, cols, expand }: { gap: Gap; cols: number; expand(g: Gap, d: 'down' | 'up' | 'all'): void }) {
+interface GapProps {
+  gap: Gap
+  cols: number
+  expand(g: Gap, d: 'down' | 'up' | 'all'): void
+  /** A section's Summarize button, when the section starts in the hidden lines. */
+  button: ComponentChildren
+}
+
+function GapRow({ gap, cols, expand, button }: GapProps) {
   const size = gap.end === Infinity ? Infinity : gap.end - gap.start + 1
   const small = size <= STEP * 2
   return (
@@ -423,6 +569,7 @@ function GapRow({ gap, cols, expand }: { gap: Gap; cols: number; expand(g: Gap, 
           )}
         </span>
         <span class="gap-header">{gap.header ? `@@ ${gap.header}` : ''}</span>
+        {button}
       </td>
     </tr>
   )
