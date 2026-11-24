@@ -1,6 +1,7 @@
 import { postJSON } from '../api'
 import { useReview } from '../ctx'
 import type { DiffFile, OrderState, Step } from '../types'
+import { HideButton } from './Rail'
 
 interface Props {
   files: DiffFile[]
@@ -11,9 +12,10 @@ interface Props {
   total: number
   currentStep: number | null
   jumpTo(path: string, step?: Step, index?: number): void
+  onHide(): void
 }
 
-export function OrderPanel({ files, order, setOrder, viewedOf, viewedCount, total, currentStep, jumpTo }: Props) {
+export function OrderPanel({ files, order, setOrder, viewedOf, viewedCount, total, currentStep, jumpTo, onHide }: Props) {
   const { api, data, toast, commits, sums } = useReview()
   const o = order.order
   const steps = o?.steps ?? []
@@ -52,6 +54,7 @@ export function OrderPanel({ files, order, setOrder, viewedOf, viewedCount, tota
               ↻ redo
             </button>
           )}
+          <HideButton side="left" label="reading order" onHide={onHide} />
         </span>
       </div>
       <div class="prog" title={`${pct}%`}>

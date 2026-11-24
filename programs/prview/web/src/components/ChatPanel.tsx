@@ -4,14 +4,21 @@ import { getJSON, stream } from '../api'
 import { useReview } from '../ctx'
 import type { ChatMessage, Selection } from '../types'
 import { markdown } from '../util'
+import { HideButton } from './Rail'
 
 export interface ChatHandle {
   /** Attach selected lines to the next question and focus the box. */
   attach(sel: Selection | null): void
 }
 
+interface Props {
+  /** Closed to a rail; the panel stays mounted so an answer on its way still arrives. */
+  hidden: boolean
+  onHide(): void
+}
+
 /** The Claude panel: one conversation per PR, kept across reloads. */
-export const ChatPanel = forwardRef<ChatHandle>(function ChatPanel(_, ref) {
+export const ChatPanel = forwardRef<ChatHandle, Props>(function ChatPanel({ hidden, onHide }, ref) {
   const rv = useReview()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [sel, setSel] = useState<Selection | null>(null)
@@ -73,10 +80,13 @@ export const ChatPanel = forwardRef<ChatHandle>(function ChatPanel(_, ref) {
   }
 
   return (
-    <aside class="right">
+    <aside class="right" hidden={hidden}>
       <div class="h">
         <span>Claude</span>
-        <span class="h-src">reads code, can't change or post anything</span>
+        <span class="h-src">
+          reads code, can't change or post anything
+          <HideButton side="right" label="Claude" onHide={onHide} />
+        </span>
       </div>
       <div class="chat" ref={list}>
         {messages.length === 0 && answer === null && (

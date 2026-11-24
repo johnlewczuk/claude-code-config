@@ -6,6 +6,7 @@ import { Description } from './components/Description'
 import { FileFull } from './components/FileFull'
 import { FileView } from './components/FileView'
 import { OrderPanel } from './components/OrderPanel'
+import { Rail } from './components/Rail'
 import { usePeek } from './peek'
 import { useSummaries } from './summaries'
 import { SubmitDialog } from './components/SubmitDialog'
@@ -38,6 +39,7 @@ export function Review({ owner, repo, number }: Props) {
   const [view, setView] = useState<View>(loadPref<View>('view', 'unified'))
   const [codeMode, setCodeMode] = useState<CodeMode>(loadPref<CodeMode>('svcode', 'diff'))
   const [chatOpen, setChatOpen] = useState(loadPref('chat', 'open') === 'open')
+  const [leftOpen, setLeftOpen] = useState(loadPref('left', 'open') === 'open')
   const [moved, setMoved] = useState(false)
   const [submitOpen, setSubmitOpen] = useState(false)
   const [toasts, setToasts] = useState<{ id: number; msg: string }[]>([])
@@ -69,6 +71,16 @@ export function Review({ owner, repo, number }: Props) {
     setToasts((t) => [...t, { id, msg }])
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 6000)
   }, [])
+
+  /** Opens or closes a side panel, and remembers it for next time. */
+  const showChat = useCallback((open: boolean) => {
+    setChatOpen(open)
+    savePref('chat', open ? 'open' : 'closed')
+  }, [])
+  const showLeft = (open: boolean) => {
+    setLeftOpen(open)
+    savePref('left', open ? 'open' : 'closed')
+  }
 
   const sumState = useSummaries(api, data, toast)
   const { closeNote } = sumState
@@ -292,10 +304,7 @@ export function Review({ owner, repo, number }: Props) {
     remove: (commentId) => act('delete', { commentId }),
     resolve: (threadId, resolved) => act('resolve', { threadId, resolved }),
     askClaude(sel) {
-      if (!chatOpen) {
-        setChatOpen(true)
-        savePref('chat', 'open')
-      }
+      showChat(true)
       setTimeout(() => chat.current?.attach(sel), 0)
     },
     async draftWithClaude(req, onText) {
@@ -427,10 +436,7 @@ export function Review({ owner, repo, number }: Props) {
             savePref('view', v)
           }}
           chatOpen={chatOpen}
-          toggleChat={() => {
-            setChatOpen(!chatOpen)
-            savePref('chat', chatOpen ? 'closed' : 'open')
-          }}
+          toggleChat={() => showChat(!chatOpen)}
           onFinish={() => setSubmitOpen(true)}
         />
         {moved && (
@@ -443,16 +449,21 @@ export function Review({ owner, repo, number }: Props) {
           </div>
         )}
         <div class="body">
-          <OrderPanel
-            files={files}
-            order={order}
-            setOrder={setOrder}
-            viewedOf={viewedOf}
-            viewedCount={viewedCount}
-            total={ghFiles.length || files.length}
-            currentStep={currentStep}
-            jumpTo={jumpTo}
-          />
+          {leftOpen ? (
+            <OrderPanel
+              files={files}
+              order={order}
+              setOrder={setOrder}
+              viewedOf={viewedOf}
+              viewedCount={viewedCount}
+              total={ghFiles.length || files.length}
+              currentStep={currentStep}
+              jumpTo={jumpTo}
+              onHide={() => showLeft(false)}
+            />
+          ) : (
+            <Rail side="left" label="Reading order" onOpen={() => showLeft(true)} />
+          )}
           <main class="mid" ref={mid}>
             {spot && <FileFull spot={spot} trail={trail} />}
             <div hidden={!!spot}>
@@ -476,7 +487,8 @@ export function Review({ owner, repo, number }: Props) {
               {files.length === 0 && <div class="empty">This PR changes no files.</div>}
             </div>
           </main>
-          {chatOpen && data.claude && <ChatPanel ref={chat} />}
+          {data.claude && <ChatPanel ref={chat} hidden={!chatOpen} onHide={() => showChat(false)} />}
+          {data.claude && !chatOpen && <Rail side="right" label="Claude" onOpen={() => showChat(true)} />}
         </div>
         {submitOpen && (
           <SubmitDialog
