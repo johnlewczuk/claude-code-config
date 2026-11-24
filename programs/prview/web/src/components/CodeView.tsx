@@ -7,7 +7,7 @@ import type { DLine } from '../rows'
 import { Chip, Code, codeClick, noSelectWithCtrl } from './Code'
 import { Peek } from './Peek'
 import { SummarizeButton, SummaryNote } from './SummaryNote'
-import { noteKey, sectionReq } from '../summaries'
+import { noteKey, sectionReq, useSections } from '../summaries'
 
 interface Props {
   path: string
@@ -23,11 +23,11 @@ interface Props {
   scroll?: number
   onScroll?(top: number): void
   /** Give each section of this file a Summarize button and show its open note. */
-  sections?: { path: string; side: 'new' | 'old' }
+  summarize?: boolean
 }
 
 /** A whole file with a gutter and syntax colours, the given line marked and centred. */
-export function CodeView({ path, side, line, lang, onCtrlClick, added, peekable, scroll, onScroll, sections }: Props) {
+export function CodeView({ path, side, line, lang, onCtrlClick, added, peekable, scroll, onScroll, summarize }: Props) {
   const rv = useReview()
   const [lines, setLines] = useState<string[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -59,7 +59,8 @@ export function CodeView({ path, side, line, lang, onCtrlClick, added, peekable,
   }, [lines, line])
 
   const language = lang ?? languageFor(path)
-  const found = sections && !rv.sums.off ? rv.sectionsOf(sections.path, sections.side) : null
+  const want = !!summarize && !rv.sums.off && rv.sums.files[path]?.status !== 'skipped'
+  const found = useSections(rv.loadSections, path, side, want)
   const starts = useMemo(() => new Map((found ?? []).map((s) => [s.start, s])), [found])
   const { openNote } = rv
   const rows = useMemo(
@@ -85,14 +86,14 @@ export function CodeView({ path, side, line, lang, onCtrlClick, added, peekable,
               }}
             >
               {starts.get(n) && (
-                <SummarizeButton section={starts.get(n)!} open={(s) => openNote(sectionReq(sections!.path, sections!.side, s))} />
+                <SummarizeButton section={starts.get(n)!} open={(s) => openNote(sectionReq(path, side, s))} />
               )}
               <Code line={{ kind, text }} lang={language} />
             </td>
           </tr>
         )
       }),
-    [lines, added, line, language, starts, openNote, sections],
+    [lines, added, line, language, starts, openNote, path, side],
   )
 
   if (error)
@@ -117,7 +118,7 @@ export function CodeView({ path, side, line, lang, onCtrlClick, added, peekable,
     out.push(row)
     if (i + 1 === at) out.push(peekRow)
     const s = starts.get(i + 1)
-    const note = s && rv.notes.get(noteKey(sectionReq(sections!.path, sections!.side, s)))
+    const note = s && rv.notes.get(noteKey(sectionReq(path, side, s)))
     if (note)
       out.push(
         <tr key={'n' + i} class="note-row">

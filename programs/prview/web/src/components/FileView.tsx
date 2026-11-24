@@ -20,7 +20,7 @@ import {
   type Row,
 } from '../rows'
 import type { PeekAnchor } from '../peek'
-import { noteKey, noteRows, sectionButtons, sectionReq } from '../summaries'
+import { noteKey, noteRows, sectionButtons, sectionReq, summarizable, useSections } from '../summaries'
 import type { DiffFile, LineRef, Note, Section, Side, Thread } from '../types'
 import { markdown } from '../util'
 import { CommentForm } from './CommentForm'
@@ -33,8 +33,6 @@ import { ThreadView } from './ThreadView'
 interface Props {
   file: DiffFile
   index: number
-  /** The first file shown, which says so when there are no summaries at all. */
-  first: boolean
   viewed: string
   collapsed: boolean
   toggleCollapsed(): void
@@ -55,7 +53,7 @@ interface SumMarks {
   open(s: Section): void
 }
 
-export function FileView({ file, index, first, viewed, collapsed, toggleCollapsed, setViewed }: Props) {
+export function FileView({ file, index, viewed, collapsed, toggleCollapsed, setViewed }: Props) {
   const rv = useReview()
   const lines = useMemo(() => fileLines(file), [file])
   const lang = useMemo(() => languageFor(file.path), [file.path])
@@ -81,11 +79,11 @@ export function FileView({ file, index, first, viewed, collapsed, toggleCollapse
   const binary = file.binary || !file.hunks?.length
   const [sumHidden, setSumHidden] = useState(false)
 
-  // Summaries: none until the page knows them, and never when they are off.
+  // Summaries: none until the page knows them, and never when they are off or the file is skipped.
   const fsum = rv.sums.files[file.path]
   const side = file.status === 'deleted' ? 'old' : 'new'
   const sidePath = side === 'old' ? file.oldPath : file.path
-  const sections = fsum && !collapsed && !binary ? rv.sectionsOf(sidePath, side) : null
+  const sections = useSections(rv.loadSections, sidePath, side, summarizable(fsum) && !collapsed && !binary)
   const { notes, openNote } = rv
   const summaryView = rv.view === 'summary'
   const marks = useMemo((): SumMarks => {
@@ -111,10 +109,7 @@ export function FileView({ file, index, first, viewed, collapsed, toggleCollapse
     let src = source
     if (!src) {
       try {
-        const side = file.status === 'deleted' ? 'old' : 'new'
-        const r = await getJSON<{ lines: string[] }>(
-          `${rv.api}/lines?side=${side}&path=${encodeURIComponent(file.status === 'deleted' ? file.oldPath : file.path)}`,
-        )
+        const r = await getJSON<{ lines: string[] }>(`${rv.api}/lines?side=${side}&path=${encodeURIComponent(sidePath)}`)
         src = r.lines
         setSource(src)
       } catch (e) {
@@ -134,7 +129,7 @@ export function FileView({ file, index, first, viewed, collapsed, toggleCollapse
   }
 
   const threadCount = rv.threads.filter((t) => t.path === file.path).length
-  const summary = !sumHidden && <FileSummary path={file.path} first={first} hide={() => setSumHidden(true)} />
+  const summary = !sumHidden && <FileSummary path={file.path} hide={() => setSumHidden(true)} />
   const table = { file, index, lines, lang, byKey, marks, expand }
 
   return (
@@ -430,14 +425,8 @@ function summaryRows(notes: Note[] | undefined, cols: number): ComponentChildren
 }
 
 /** The file's summary, under its name bar. */
-function FileSummary({ path, first, hide }: { path: string; first: boolean; hide(): void }) {
+function FileSummary({ path, hide }: { path: string; hide(): void }) {
   const rv = useReview()
-  if (rv.sums.off)
-    return first ? (
-      <div class="fsum meta" title={rv.sums.off}>
-        Summaries need the claude command
-      </div>
-    ) : null
   const s = rv.sums.files[path]
   if (!s) return null
   return (
@@ -492,7 +481,7 @@ function SelectionBar({ file, range, lines }: { file: DiffFile; range: Range; li
           ✦ Ask Claude
         </button>
       )}
-      {rv.sums.files[file.path] && (
+      {summarizable(rv.sums.files[file.path]) && (
         <button class="btn" onClick={summarize} title="Ask Claude what these lines do and what this PR changed in them">
           Summarize
         </button>

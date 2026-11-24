@@ -1,17 +1,17 @@
 // File summaries (written by the server in the background) and notes that
 // summarize a section or a selection on request. The hook holds their state;
 // the pure functions place the Summarize buttons and the notes among the rows.
-import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { getJSON, postJSON } from './api'
 import type { Row } from './rows'
-import type { LoadPayload, Note, NoteReq, Section, SummariesPayload } from './types'
+import type { FileSum, LoadPayload, Note, NoteReq, Section, SummariesPayload } from './types'
 
 export interface SummaryActions {
   sums: SummariesPayload
   /** Asks again for one file's summary. */
   redoSum(path: string): void
-  /** The sections of a file side, fetched once and then kept; null while loading. */
-  sectionsOf(path: string, side: 'new' | 'old'): Section[] | null
+  /** The sections of a file side, fetched once per head; see useSections. */
+  loadSections(path: string, side: 'new' | 'old'): Promise<Section[]>
   /** Open notes, the most recently opened last. */
   notes: Map<string, Note>
   /** Opens a note and asks for its summary, unless it already has one or is waiting for one. */
@@ -30,6 +30,22 @@ export function sectionReq(path: string, side: 'new' | 'old', s: Section): NoteR
 
 const NONE: SummariesPayload = { off: '', files: {} }
 
+/** Whether two answers from /summaries say the same, so the page needn't draw again. */
+export function sameSums(a: SummariesPayload, b: SummariesPayload): boolean {
+  const ka = Object.keys(a.files)
+  if (a.off !== b.off || ka.length !== Object.keys(b.files).length) return false
+  return ka.every((k) => {
+    const x = a.files[k]
+    const y = b.files[k]
+    return !!y && x.status === y.status && x.text === y.text && x.error === y.error
+  })
+}
+
+/** Whether a file's sections and lines can be summarized: summaries are on and the file isn't skipped. */
+export function summarizable(s: FileSum | undefined): boolean {
+  return !!s && s.status !== 'skipped'
+}
+
 /** `data` is the latest load: each one fetches the summaries again, and a new head drops sections and notes. */
 export function useSummaries(api: string, data: LoadPayload | null, toast: (msg: string) => void): SummaryActions {
   const [sums, setSums] = useState<SummariesPayload>(NONE)
@@ -39,73 +55,67 @@ export function useSummaries(api: string, data: LoadPayload | null, toast: (msg:
   // The request each note waits for; an answer to any other is dropped.
   const asking = useRef(new Map<string, number>())
   const nextAsk = useRef(1)
-  // Sections by side and path, for the head on show. Replaced, not cleared, on a new head,
-  // so a fetch for the old head fills a cache no one reads.
-  const sections = useRef(new Map<string, Section[] | null>())
-  const [, bump] = useState(0)
+  // Draws again only when something changed: a poll mostly brings the same answer.
+  const takeSums = useCallback((p: SummariesPayload) => setSums((cur) => (sameSums(cur, p) ? cur : p)), [])
 
   useEffect(() => {
     if (!data) return
     let live = true
     getJSON<SummariesPayload>(`${api}/summaries`).then(
-      (p) => live && setSums(p),
+      (p) => live && takeSums(p),
       () => {}, // the poll or the next load tries again
     )
     return () => {
       live = false
     }
-  }, [api, data])
+  }, [api, data, takeSums])
 
   // Line numbers belong to the head they were read from.
   const head = data?.head
   useEffect(() => {
-    sections.current = new Map()
     asking.current.clear()
     setNotes(new Map())
   }, [api, head])
+
+  // Sections by side and path, for the head on show: a new head makes a new cache.
+  const loadSections = useMemo(() => {
+    const cache = new Map<string, Promise<Section[]>>()
+    return (path: string, side: 'new' | 'old') => {
+      const key = `${side}:${path}`
+      let got = cache.get(key)
+      if (!got) {
+        got = getJSON<{ sections: Section[] | null }>(`${api}/sections?${new URLSearchParams({ path, side })}`).then(
+          (r) => r.sections ?? [],
+          () => [], // no sections: the file just gets no buttons
+        )
+        cache.set(key, got)
+      }
+      return got
+    }
+  }, [api, head]) // not read inside: a new head is what makes the cache stale
 
   const busy = Object.values(sums.files).some((f) => f.status === 'waiting' || f.status === 'running')
   useEffect(() => {
     if (!busy) return
     const t = setInterval(async () => {
       try {
-        setSums(await getJSON<SummariesPayload>(`${api}/summaries`))
+        takeSums(await getJSON<SummariesPayload>(`${api}/summaries`))
       } catch {
         // try again next tick
       }
     }, 3000)
     return () => clearInterval(t)
-  }, [busy, api])
+  }, [busy, api, takeSums])
 
   const redoSum = useCallback(
     async (path: string) => {
       try {
-        setSums(await postJSON<SummariesPayload>(`${api}/summaries/redo`, { path }))
+        takeSums(await postJSON<SummariesPayload>(`${api}/summaries/redo`, { path }))
       } catch (e) {
         toast(e instanceof Error ? e.message : String(e))
       }
     },
-    [api, toast],
-  )
-
-  const sectionsOf = useCallback(
-    (path: string, side: 'new' | 'old') => {
-      const cache = sections.current
-      const key = `${side}:${path}`
-      if (cache.has(key)) return cache.get(key)!
-      cache.set(key, null)
-      getJSON<{ sections: Section[] | null }>(`${api}/sections?${new URLSearchParams({ path, side })}`)
-        .then(
-          (r) => r.sections ?? [],
-          () => [], // no sections: the file just gets no buttons
-        )
-        .then((s) => {
-          cache.set(key, s)
-          if (cache === sections.current) bump((n) => n + 1)
-        })
-      return null
-    },
-    [api],
+    [api, toast, takeSums],
   )
 
   const openNote = useCallback(
@@ -151,7 +161,25 @@ export function useSummaries(api: string, data: LoadPayload | null, toast: (msg:
     })
   }, [])
 
-  return { sums, redoSum, sectionsOf, notes, openNote, closeNote }
+  return { sums, redoSum, loadSections, notes, openNote, closeNote }
+}
+
+/**
+ * The sections of a file side, or null while they load or when `want` is
+ * false. Only the component that asks draws again when they arrive, so the
+ * sections of many files coming in one by one don't redraw the whole page.
+ */
+export function useSections(load: SummaryActions['loadSections'], path: string, side: 'new' | 'old', want: boolean): Section[] | null {
+  const [got, setGot] = useState<{ load: typeof load; path: string; side: string; sections: Section[] } | null>(null)
+  useEffect(() => {
+    if (!want) return
+    let live = true
+    load(path, side).then((sections) => live && setGot({ load, path, side, sections }))
+    return () => {
+      live = false
+    }
+  }, [load, path, side, want])
+  return want && got && got.load === load && got.path === path && got.side === side ? got.sections : null
 }
 
 /** The line number a row shows on a side, if it shows one. */

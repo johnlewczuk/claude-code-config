@@ -72,13 +72,17 @@ export function Review({ owner, repo, number }: Props) {
 
   const sumState = useSummaries(api, data, toast)
   const { closeNote } = sumState
-  // Esc closes the most recently opened note, unless the peek (which takes Esc itself) is open.
+  // Esc closes the most recently opened note that is on screen, unless the peek (which takes Esc itself) is open.
   const escNow = useRef({ peekOpen: false, notes: sumState.notes })
   escNow.current = { peekOpen: !!peekState.peek, notes: sumState.notes }
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented || escNow.current.peekOpen || typing(e.target)) return
-      const last = [...escNow.current.notes.keys()].pop()
+      // A note in a hidden file, or in the diff behind the whole-file view, has no box on screen.
+      const shown = new Set<string>()
+      for (const el of document.querySelectorAll<HTMLElement>('.snote[data-note]'))
+        if (el.getClientRects().length > 0) shown.add(el.dataset.note!)
+      const last = [...escNow.current.notes.keys()].filter((k) => shown.has(k)).pop()
       if (last) closeNote(last)
     }
     window.addEventListener('keydown', onKey)
@@ -453,12 +457,16 @@ export function Review({ owner, repo, number }: Props) {
             {spot && <FileFull spot={spot} trail={trail} />}
             <div hidden={!!spot}>
               <Description />
-              {ordered.map(({ file, index }, i) => (
+              {sumState.sums.off && (
+                <div class="fsum meta" title={sumState.sums.off}>
+                  Summaries need the claude command
+                </div>
+              )}
+              {ordered.map(({ file, index }) => (
                 <FileView
                   key={file.path}
                   file={file}
                   index={index}
-                  first={i === 0}
                   viewed={viewedOf(file.path)}
                   collapsed={collapsed.has(file.path)}
                   toggleCollapsed={() => toggleCollapsed(file.path)}

@@ -9,7 +9,7 @@ export function SummaryNote({ note }: { note: Note }) {
   const { req } = note
   const what = req.name || (req.start === req.end ? `line ${req.start}` : `lines ${req.start}–${req.end}`)
   return (
-    <div class="snote">
+    <div class="snote" data-note={noteKey(req)}>
       <div class="snote-head">
         <span>
           Summary of <span class="snote-name">{what}</span>
