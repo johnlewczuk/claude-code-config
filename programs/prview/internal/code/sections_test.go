@@ -48,7 +48,9 @@ func TestSections(t *testing.T) {
 			"  }",
 			"  private x = 1",
 			"}",
-		}, []Section{{"f", 1, 3}, {"C", 4, 4}, {"load", 5, 8}}},
+			"export const g = (a: number) => {", // 9
+			"}",
+		}, []Section{{"f", 1, 3}, {"C", 4, 4}, {"load", 5, 8}, {"g", 9, 10}}},
 		{"python", "a.py", []string{
 			"def f():", // 1
 			"    pass",

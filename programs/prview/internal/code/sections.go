@@ -97,6 +97,10 @@ var typeOpener = regexp.MustCompile(`^(?:(?:pub(?:\([^)]*\))?|export|default|pub
 // no return type in front, as in TypeScript's "load(): void {".
 var method = regexp.MustCompile(`^(?:(?:public|private|protected|static|async|override|readonly|get|set)\s+)*(\w+)\s*\([^)]*\)[^;=]*\{\s*$`)
 
+// arrowFunc matches a constant or variable at the left edge that holds a
+// function, as in "export const g = (a: number) => {".
+var arrowFunc = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:const|let|var)\s+\w+[^=]*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]+)?=>|\w+\s*=>)`)
+
 func indentOf(line string) int {
 	return len(line) - len(strings.TrimLeft(line, " \t"))
 }
@@ -107,7 +111,7 @@ func indentOf(line string) int {
 // before the next section, minus trailing blank lines. Definitions at the
 // left edge always start a section; indented ones only when they are direct
 // members of a type (class, struct, interface, impl, trait or enum), so
-// locals inside a function don't. Constants, variables and fields never do.
+// locals inside a function don't. Constants, variables and fields never do, except those holding a function.
 func Sections(path string, lines []string) []Section {
 	type def struct {
 		name  string
@@ -145,6 +149,9 @@ func Sections(path string, lines []string) []Section {
 		}
 		if name == "" {
 			continue
+		}
+		if value && ind == 0 && arrowFunc.MatchString(l) {
+			value = false
 		}
 		isOpener := typeOpener.MatchString(strings.TrimLeft(l, " \t"))
 		// A member declared without a body (a prototype) is not a section.
