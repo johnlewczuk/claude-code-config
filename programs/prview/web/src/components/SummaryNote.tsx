@@ -1,6 +1,6 @@
 import { useReview } from '../ctx'
 import { noteKey } from '../summaries'
-import type { Note } from '../types'
+import type { Note, Section } from '../types'
 import { markdown } from '../util'
 
 /** A summary of a section or of selected lines, in a box like the peek window's. */
@@ -33,5 +33,21 @@ export function SummaryNote({ note }: { note: Note }) {
         <div class="snote-body md" dangerouslySetInnerHTML={{ __html: markdown(note.text) }} />
       )}
     </div>
+  )
+}
+
+/** The ▸ Summarize button of one section. */
+export function SummarizeButton({ section, open }: { section: Section; open(s: Section): void }) {
+  return (
+    <button
+      class="sbtn"
+      onClick={(e) => {
+        e.stopPropagation()
+        open(section)
+      }}
+      title="Ask Claude what this part of the file does and what this PR changed in it"
+    >
+      ▸ Summarize {section.name || 'top of file'}
+    </button>
   )
 }

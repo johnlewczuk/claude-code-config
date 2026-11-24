@@ -17,15 +17,17 @@ import {
   type Expansion,
   type Gap,
   type Range,
+  type Row,
 } from '../rows'
 import type { PeekAnchor } from '../peek'
-import { noteKey, noteRows, sectionButtons } from '../summaries'
+import { noteKey, noteRows, sectionButtons, sectionReq } from '../summaries'
 import type { DiffFile, LineRef, Note, Section, Side, Thread } from '../types'
 import { markdown } from '../util'
 import { CommentForm } from './CommentForm'
 import { Chip, Code, codeClick, noSelectWithCtrl } from './Code'
 import { Peek } from './Peek'
-import { SummaryNote } from './SummaryNote'
+import { SummarizeButton, SummaryNote } from './SummaryNote'
+import { SummaryView } from './SummaryView'
 import { ThreadView } from './ThreadView'
 
 interface Props {
@@ -85,9 +87,13 @@ export function FileView({ file, index, first, viewed, collapsed, toggleCollapse
   const sidePath = side === 'old' ? file.oldPath : file.path
   const sections = fsum && !collapsed && !binary ? rv.sectionsOf(sidePath, side) : null
   const { notes, openNote } = rv
+  const summaryView = rv.view === 'summary'
   const marks = useMemo((): SumMarks => {
     const fileNotes = [...notes.values()].filter((n) => n.req.path === (n.req.side === 'old' ? file.oldPath : file.path))
-    const buttons = sections ? sectionButtons(rows, sections, side) : new Map<number, Section>()
+    // The Summary view shows the buttons and the sections' notes in its left pane; only other notes stay in the code.
+    const sectionNote = (n: Note) => n.req.side === side && !!sections?.some((s) => s.start === n.req.start && s.end === n.req.end)
+    const inline = summaryView ? fileNotes.filter((n) => !sectionNote(n)) : fileNotes
+    const buttons = sections && !summaryView ? sectionButtons(rows, sections, side) : new Map<number, Section>()
     const item = (i: number): Item => {
       const r = rows[i]
       return r.t === 'gap' ? r.gap : r.line
@@ -96,10 +102,10 @@ export function FileView({ file, index, first, viewed, collapsed, toggleCollapse
     return {
       side,
       buttons: byItem(buttons),
-      notes: byItem(noteRows(rows, buttons, side, fileNotes)),
-      open: (s) => openNote({ path: sidePath, side, start: s.start, end: s.end, name: s.name }),
+      notes: byItem(noteRows(rows, buttons, side, inline)),
+      open: (s) => openNote(sectionReq(sidePath, side, s)),
     }
-  }, [rows, sections, side, sidePath, notes, openNote, file])
+  }, [rows, sections, side, sidePath, notes, openNote, file, summaryView])
 
   const expand = async (gap: Gap, dir: 'down' | 'up' | 'all') => {
     let src = source
@@ -128,6 +134,8 @@ export function FileView({ file, index, first, viewed, collapsed, toggleCollapse
   }
 
   const threadCount = rv.threads.filter((t) => t.path === file.path).length
+  const summary = !sumHidden && <FileSummary path={file.path} first={first} hide={() => setSumHidden(true)} />
+  const table = { file, index, lines, lang, byKey, marks, expand }
 
   return (
     <section class="file" id={`file-${index}`}>
@@ -160,14 +168,24 @@ export function FileView({ file, index, first, viewed, collapsed, toggleCollapse
       </div>
       {!collapsed && (
         <>
-          {!sumHidden && <FileSummary path={file.path} first={first} hide={() => setSumHidden(true)} />}
+          {(!summaryView || binary) && summary}
           {loose.length > 0 && <LooseThreads threads={loose} />}
           {binary ? (
             <div class="empty">{file.binary ? 'Binary file not shown.' : 'No text changes (mode or rename only).'}</div>
+          ) : summaryView ? (
+            <SummaryView
+              rows={rows}
+              sections={sections}
+              side={side}
+              sidePath={sidePath}
+              open={marks.open}
+              summary={summary}
+              code={(part) => <UnifiedTable {...table} rows={part} />}
+            />
           ) : rv.view === 'split' ? (
-            <SplitTable file={file} index={index} rows={rows} lines={lines} lang={lang} byKey={byKey} marks={marks} expand={expand} />
+            <SplitTable {...table} rows={rows} />
           ) : (
-            <UnifiedTable file={file} index={index} rows={rows} lines={lines} lang={lang} byKey={byKey} marks={marks} expand={expand} />
+            <UnifiedTable {...table} rows={rows} />
           )}
         </>
       )}
@@ -178,7 +196,7 @@ export function FileView({ file, index, first, viewed, collapsed, toggleCollapse
 interface TableProps {
   file: DiffFile
   index: number
-  rows: ReturnType<typeof unifiedRows>
+  rows: Row[]
   lines: DLine[]
   lang: string | null
   byKey: Map<string, Thread[]>
@@ -186,6 +204,7 @@ interface TableProps {
   expand(gap: Gap, dir: 'down' | 'up' | 'all'): void
 }
 
+/** The unified diff of `rows`: all of a file's rows, or one block of the Summary view. */
 function UnifiedTable({ file, index, rows, lines, lang, byKey, marks, expand }: TableProps) {
   const rv = useReview()
   const out: ComponentChildren[] = []
@@ -396,19 +415,7 @@ function peekHangsHere(a: PeekAnchor | undefined, index: number, l: DLine, other
 /** The ▸ Summarize button of the section that starts on this row, if one does. */
 function sectionButton(marks: SumMarks, at: Item) {
   const s = marks.buttons.get(at)
-  if (!s) return null
-  return (
-    <button
-      class="sbtn"
-      onClick={(e) => {
-        e.stopPropagation()
-        marks.open(s)
-      }}
-      title="Ask Claude what this part of the file does and what this PR changed in it"
-    >
-      ▸ Summarize {s.name || 'top of file'}
-    </button>
-  )
+  return s ? <SummarizeButton section={s} open={marks.open} /> : null
 }
 
 /** Rows holding summary notes, under the row they belong to. */

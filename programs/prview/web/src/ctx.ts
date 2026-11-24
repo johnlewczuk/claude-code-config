@@ -3,10 +3,11 @@ import { useContext } from 'preact/hooks'
 import type { Range } from './rows'
 import type { PeekActions } from './peek'
 import type { SummaryActions } from './summaries'
+import type { CodeMode } from './svblocks'
 import type { LoadPayload, Selection, Spot, Thread } from './types'
 import type { CommitInfo } from './util'
 
-export type View = 'unified' | 'split'
+export type View = 'unified' | 'split' | 'summary'
 
 /** What every part of the review screen can read and do. */
 export interface ReviewApi extends PeekActions, SummaryActions {
@@ -15,6 +16,9 @@ export interface ReviewApi extends PeekActions, SummaryActions {
   commits: Map<string, CommitInfo>
   threads: Thread[]
   view: View
+  /** What the Summary view's code pane shows, for every file. */
+  codeMode: CodeMode
+  setCodeMode(m: CodeMode): void
 
   selection: Range | null
   select(path: string, ref: Range['start'], extend: boolean): void

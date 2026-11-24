@@ -12,6 +12,7 @@ import { SubmitDialog } from './components/SubmitDialog'
 import { TopBar } from './components/TopBar'
 import { formKey, ReviewCtx, type ReviewApi, type View } from './ctx'
 import { hashToSpot, spotToHash } from './nav'
+import type { CodeMode } from './svblocks'
 import { fileLines, type Range } from './rows'
 import type { DiffFile, GHFile, LoadPayload, OrderState, Spot, Step, Thread, ThreadsPayload } from './types'
 import { commitIndex, loadPref, savePref, type CommitInfo } from './util'
@@ -35,6 +36,7 @@ export function Review({ owner, repo, number }: Props) {
   const [order, setOrder] = useState<OrderState>({ status: 'none' })
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [view, setView] = useState<View>(loadPref<View>('view', 'unified'))
+  const [codeMode, setCodeMode] = useState<CodeMode>(loadPref<CodeMode>('svcode', 'diff'))
   const [chatOpen, setChatOpen] = useState(loadPref('chat', 'open') === 'open')
   const [moved, setMoved] = useState(false)
   const [submitOpen, setSubmitOpen] = useState(false)
@@ -219,6 +221,11 @@ export function Review({ owner, repo, number }: Props) {
     commits,
     threads,
     view,
+    codeMode,
+    setCodeMode(m) {
+      setCodeMode(m)
+      savePref('svcode', m)
+    },
     selection,
     select(path, ref, extend) {
       if (extend && anchor.current && selection?.path === path) {

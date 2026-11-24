@@ -23,6 +23,11 @@ export function noteKey(r: NoteReq): string {
   return `${r.side}:${r.path}:${r.start}-${r.end}`
 }
 
+/** The request that summarizes a section of a file side. */
+export function sectionReq(path: string, side: 'new' | 'old', s: Section): NoteReq {
+  return { path, side, start: s.start, end: s.end, name: s.name }
+}
+
 const NONE: SummariesPayload = { off: '', files: {} }
 
 /** `data` is the latest load: each one fetches the summaries again, and a new head drops sections and notes. */

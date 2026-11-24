@@ -1311,6 +1311,62 @@ td.flash {
   }
 }
 
+/* Summary view: the notes in a left pane, each block of code beside its
+   section's note. A block is as tall as the taller side. */
+.sv-row {
+  display: flex;
+}
+.sv-left {
+  flex: 0 0 34%;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+}
+.sv-right {
+  flex: 1;
+  min-width: 0;
+}
+.sv-head {
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+.sv-head > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+}
+.sv-head .seg button {
+  padding: 0 8px;
+  font-size: 11px;
+}
+.sv-block {
+  border-top: 1px solid var(--border);
+}
+.sv-block > .sv-left {
+  padding: 6px 8px;
+}
+.sv-block .sbtn {
+  float: none;
+  max-width: 100%;
+  margin: 0;
+  opacity: 1;
+}
+@media (max-width: 800px) {
+  .sv-row {
+    flex-direction: column;
+  }
+  .sv-left {
+    flex: none;
+    border-right: 0;
+  }
+  .sv-head > .sv-left,
+  .sv-block > .sv-left:empty {
+    display: none;
+  }
+}
+
 /* Whole-file view */
 .full {
   display: flex;
