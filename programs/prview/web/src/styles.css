@@ -239,6 +239,8 @@ a {
   border-right: 1px solid var(--border);
   padding: 10px;
   overflow-y: auto;
+  /* Long paths and identifiers in notes wrap instead of widening the panel */
+  overflow-wrap: anywhere;
 }
 .mid {
   flex: 1;
@@ -350,7 +352,6 @@ button.step:hover {
 .step .f {
   font-family: var(--mono);
   font-size: 12px;
-  overflow-wrap: anywhere;
 }
 .step .note {
   color: var(--muted);
@@ -368,7 +369,6 @@ button.step:hover {
   font: 12px/1.7 var(--mono);
   padding: 0 6px;
   cursor: pointer;
-  overflow-wrap: anywhere;
 }
 .rest-file .ck {
   width: 10px;
