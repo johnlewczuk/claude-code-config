@@ -3,7 +3,7 @@ import { useMemo } from 'preact/hooks'
 import { useReview } from '../ctx'
 import type { Row } from '../rows'
 import { noteKey, sectionReq } from '../summaries'
-import { sectionBlocks } from '../svblocks'
+import { sectionBlocks, type Block } from '../svblocks'
 import type { Section } from '../types'
 import { SummarizeButton, SummaryNote } from './SummaryNote'
 
@@ -22,9 +22,10 @@ interface Props {
 }
 
 /**
- * A file as notes in a left pane beside its code: the file summary at the
- * top, then one block per section with its note or Summarize button level
- * with its rows. Each block is as tall as the taller side.
+ * A file as notes in a left pane beside its code: one block per section with
+ * its note or Summarize button level with its rows, and the file summary at
+ * the top of the first block, so the code starts beside it. Each block is as
+ * tall as the taller side.
  */
 export function SummaryView({ rows, sections, side, sidePath, open, summary, code }: Props) {
   const rv = useReview()
@@ -49,15 +50,12 @@ export function SummaryView({ rows, sections, side, sidePath, open, summary, cod
           )}
         </div>
       </div>
-      <div class="sv-row">
-        <div class="sv-left">{summary}</div>
-        <div class="sv-right" />
-      </div>
       {blocks.map((b, k) => {
         const note = b.section && rv.notes.get(noteKey(sectionReq(sidePath, side, b.section)))
         return (
-          <div class="sv-row sv-block" key={k}>
+          <div class="sv-row sv-block" key={blockKey(b)}>
             <div class="sv-left">
+              {k === 0 && summary}
               {note ? <SummaryNote note={note} /> : b.section && <SummarizeButton section={b.section} open={open} />}
             </div>
             <div class="sv-right">{code(b.rows)}</div>
@@ -66,4 +64,11 @@ export function SummaryView({ rows, sections, side, sidePath, open, summary, cod
       })}
     </div>
   )
+}
+
+/** Names a block by where it starts, so a block keeps its table when blocks before it change. */
+function blockKey(b: Block): string {
+  if (b.section) return `s${b.section.start}`
+  const r = b.rows[0]
+  return r.t === 'gap' ? `g${r.gap.index}` : `l${r.line.old ?? ''}:${r.line.new ?? ''}`
 }
