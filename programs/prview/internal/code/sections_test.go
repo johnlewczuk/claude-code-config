@@ -72,12 +72,14 @@ func TestSections(t *testing.T) {
 			"}",
 		}, []Section{{"f", 1, 3}, {"C", 4, 4}, {"load", 5, 8}, {"g", 9, 10}}},
 		{"python", "a.py", []string{
-			"def f():", // 1
+			"@app.route('/')", // 1
+			"def f():",
 			"    pass",
-			"class C:", // 3
+			"class C:", // 4
+			"    @property",
 			"    def m(self):",
 			"        x = 1",
-		}, []Section{{"f", 1, 2}, {"C", 3, 3}, {"m", 4, 5}}},
+		}, []Section{{"f", 1, 3}, {"C", 4, 4}, {"m", 5, 7}}},
 		{"none", "a.txt", []string{"", "hello", "world", ""}, []Section{{"", 1, 3}}},
 		{"empty", "a.go", nil, nil},
 	}

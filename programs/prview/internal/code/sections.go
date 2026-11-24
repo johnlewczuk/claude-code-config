@@ -131,19 +131,23 @@ var preamble = regexp.MustCompile(`^(?:import|package|#\s*include|from\s+\S+\s+i
 // sections rather than being one, so it belongs to the section above it.
 var namespace = regexp.MustCompile(`^(?:(?:export|declare)\s+)*(?:namespace|module)\b`)
 
+// decorator matches a decorator or annotation line, as in "@property" or
+// "@Override". It belongs to the definition below it, like a comment.
+var decorator = regexp.MustCompile(`^@\w`)
+
 func indentOf(line string) int {
 	return len(line) - len(strings.TrimLeft(line, " \t"))
 }
 
 // Sections splits a file into the top of the file (Name "", when it holds
 // anything but blank lines) and one section per function or type. A section
-// starts at the comment directly above its definition and runs to the line
-// before the next section, minus trailing blank lines. Definitions at the
-// left edge always start a section; indented ones only when they are direct
-// members of a type (class, struct, interface, impl, trait or enum) or a
-// namespace, so locals inside a function don't. Constants, variables and
-// fields never do, except those holding a function. Imports, package lines
-// and namespace openers never do either.
+// starts at the comment and decorators directly above its definition and
+// runs to the line before the next section, minus trailing blank lines.
+// Definitions at the left edge always start a section; indented ones only
+// when they are direct members of a type (class, struct, interface, impl,
+// trait or enum) or a namespace, so locals inside a function don't.
+// Constants, variables and fields never do, except those holding a function.
+// Imports, package lines and namespace openers never do either.
 func Sections(path string, lines []string) []Section {
 	type def struct {
 		name  string
@@ -192,7 +196,8 @@ func Sections(path string, lines []string) []Section {
 		prototype := ind > 0 && strings.HasSuffix(strings.TrimSpace(l), ";")
 		if !value && !prototype && !namespace.MatchString(trimmed) {
 			start := i
-			for start > 0 && strings.TrimSpace(lines[start-1]) != "" && IsCommentOnly(path, lines[start-1]) {
+			for start > 0 && strings.TrimSpace(lines[start-1]) != "" &&
+				(IsCommentOnly(path, lines[start-1]) || decorator.MatchString(strings.TrimLeft(lines[start-1], " \t"))) {
 				start--
 			}
 			defs = append(defs, def{name, start})
